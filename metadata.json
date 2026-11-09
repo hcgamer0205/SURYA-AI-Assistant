@@ -1,0 +1,11 @@
+{
+  "name": "SURYA AI Assistant",
+  "description": "Fast, Intelligent, Multilingual Personal AI Assistant for Android powered by Google Gemini with real-time response streaming, Indian and international language support, and solar holographic UI.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

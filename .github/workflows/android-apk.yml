@@ -1,0 +1,81 @@
+name: Build SURYA Android Mobile APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    name: Build Android APK (Java 21, Gradle 8.11.1, SDK 36)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'gradle'
+
+      - name: Set up Android SDK 36
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 36
+          build-tools: 36.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: |
+          npm ci || npm install
+
+      - name: Build Web Application
+        run: |
+          npm run build
+
+      - name: Verify Capacitor Config & Copy Assets
+        run: |
+          mkdir -p android/app/src/main/assets/public
+          cp -r dist/* android/app/src/main/assets/public/
+
+      - name: Set up Gradle 8.11.1 Wrapper
+        working-directory: android
+        run: |
+          gradle wrapper --gradle-version 8.11.1 --distribution-type bin || true
+          chmod +x gradlew || true
+
+      - name: Build Android Debug APK
+        working-directory: android
+        run: |
+          if [ -f "./gradlew" ]; then
+            ./gradlew assembleDebug --stacktrace
+          else
+            gradle assembleDebug --stacktrace
+          fi
+
+      - name: Compute SHA-256 Checksum & Diagnostics
+        run: |
+          find android/app/build/outputs/apk/ -name "*.apk" -type f | while read -r apk; do
+            echo "Found APK: $apk"
+            sha256sum "$apk" > "${apk}.sha256"
+            cat "${apk}.sha256"
+          done
+
+      - name: Upload SURYA Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Surya-Android.apk
+          path: |
+            android/app/build/outputs/apk/debug/*.apk
+            android/app/build/outputs/apk/debug/*.sha256
+          if-no-files-found: warn
