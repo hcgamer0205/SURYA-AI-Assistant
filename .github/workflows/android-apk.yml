@@ -23,11 +23,17 @@ jobs:
           java-version: '21'
           cache: 'gradle'
 
-      - name: Set up Android SDK 36
-        uses: android-actions/setup-android@v3
+      - name: Set up Android SDK 36 (api-level: 36)
+        uses: android-actions/setup-android@v4
         with:
-          api-level: 36
-          build-tools: 36.0.0
+          packages: |
+            platform-tools
+            platforms;android-36
+            build-tools;36.0.0
+
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | sdkmanager --licenses || true
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -65,10 +71,13 @@ jobs:
 
       - name: Compute SHA-256 Checksum & Diagnostics
         run: |
+          mkdir -p release-apk
           find android/app/build/outputs/apk/ -name "*.apk" -type f | while read -r apk; do
             echo "Found APK: $apk"
             sha256sum "$apk" > "${apk}.sha256"
-            cat "${apk}.sha256"
+            cp "$apk" release-apk/Surya-Android.apk
+            sha256sum release-apk/Surya-Android.apk > release-apk/Surya-Android.apk.sha256
+            cat release-apk/Surya-Android.apk.sha256
           done
 
       - name: Upload SURYA Android APK Artifact
@@ -76,6 +85,7 @@ jobs:
         with:
           name: Surya-Android.apk
           path: |
+            release-apk/*
             android/app/build/outputs/apk/debug/*.apk
             android/app/build/outputs/apk/debug/*.sha256
           if-no-files-found: warn
