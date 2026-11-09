@@ -10,37 +10,42 @@
 
 ---
 
-## 2. GitHub Actions Android Build Failure Diagnosis & Fix
+## 2. GitHub Actions Build Failure Diagnosis & Fix (#2)
 
-### Problem Analysis
-GitHub Actions previously failed during the Android SDK setup step with:
+### Inspection of Failed Run
+- **Repository**: `https://github.com/hcgamer0205/SURYA-AI-Assistant`
+- **Failed Run**: Run ID `42587864561`
+- **Commit**: `180d5c5876d4c64da193ee77d999809781c167dd`
+- **Failure Symptom**: The workflow failed instantly before spinning up runner jobs (`total_count: 0, jobs: []`).
+- **Actual GitHub Actions Diagnostic**:
+  ```
+  Invalid workflow file:
+  You have an error in your yaml syntax on line 26
+  ```
+
+### Root Cause
+In commit `180d5c5`, line 26 of `.github/workflows/android-apk.yml` was:
+```yaml
+      - name: Set up Android SDK 36 (api-level: 36)
 ```
-Warning: Failed to find package 'tools'
-/usr/local/lib/android/sdk/cmdline-tools/16.0/bin/sdkmanager failed with exit code 1
-```
-- **Root Cause**: The workflow invoked `android-actions/setup-android@v3` with unsupported inputs `api-level: 36` and `build-tools: 36.0.0` without declaring `packages:`. Because `packages` was omitted, `@v3` defaulted to its legacy package list which included `tools`. Google deprecated and completely purged the old `tools` package from the Android SDK repository, which caused modern `sdkmanager` (cmdline-tools 16.0+) on the GitHub runner to terminate with exit code 1.
+In standard YAML syntax, an unquoted scalar containing `: ` (a colon followed by space) is interpreted as a mapping entry key rather than plain text. This triggered `YAMLException: bad indentation of a mapping entry (26:47)`, causing GitHub's workflow validator to immediately reject the file before job execution.
 
 ### Applied Resolution
-1. **Upgraded Action to `android-actions/setup-android@v4`**:
-   - Switched from `@v3` to `@v4`, which drops obsolete packages and provides native compatibility with modern command-line tools.
-2. **Explicit Modern SDK Package Specification**:
-   - Replaced default legacy packages with explicit component declarations:
+1. **YAML Quoting Correction**:
+   - Enclosed the step title in double quotes:
      ```yaml
-     - name: Set up Android SDK 36 (api-level: 36)
-       uses: android-actions/setup-android@v4
-       with:
-         packages: |
-           platform-tools
-           platforms;android-36
-           build-tools;36.0.0
+     - name: "Set up Android SDK 36 (api-level: 36)"
      ```
-3. **Automated License Acceptance**:
-   - Added `yes | sdkmanager --licenses || true` step to avoid interactive license prompts during CI.
-4. **Capacitor 7 & Android Resource Completeness**:
-   - Added `implementation 'com.capacitorjs:core:7.0.1'` to `android/app/build.gradle` to resolve `BridgeActivity` compilation in `MainActivity.java`.
-   - Created missing XML resources (`res/values/styles.xml`, `res/values/strings.xml`, `res/drawable/ic_launcher_background.xml`, `res/drawable/ic_launcher_foreground.xml`, `res/mipmap-anydpi-v26/ic_launcher.xml`, and `res/mipmap-anydpi-v26/ic_launcher_round.xml`) so AAPT asset packaging succeeds cleanly.
-5. **Release Artifact Staging**:
-   - Updated the artifact step to stage `release-apk/Surya-Android.apk` alongside its SHA-256 checksum and diagnostic logs.
+   - Verified 100% clean parsing with `js-yaml` validation.
+2. **Added `gradle/actions/setup-gradle@v4`**:
+   - Ensured Gradle 8.11.1 is installed and available in `PATH` on Ubuntu GitHub runners.
+3. **Gradle Wrapper Version Configuration**:
+   - Added `android/gradle/wrapper/gradle-wrapper.properties` pointing to `gradle-8.11.1-bin.zip`.
+4. **Android Build Hardening**:
+   - Created `android/app/proguard-rules.pro` containing JavaScript interface and assistant keep rules.
+   - Maintained Capacitor 7 (`com.capacitorjs:core:7.0.1`) and standard adaptive launcher icons / XML styles.
+5. **Release Staging**:
+   - Output APK is staged to `release-apk/Surya-Android.apk` with SHA-256 checksum generated during the build step.
 
 ---
 
@@ -82,4 +87,6 @@ Zero occurrences of legacy branding exist across all source files, configuration
 - **`compile_applet`**: Succeeded (Vite production build bundled with 0 errors).
 - **`lint_applet`**: Succeeded (`tsc --noEmit` exited with code 0).
 - **Node.js Test Suite**: `8/8 pass`, 0 fail, 0 skipped.
+- **YAML Validation**: Verified error-free with `js-yaml`.
 - **Backend Health Check**: `http://localhost:3000/api/health` returned `ONLINE 1.3.0-SURYA-ANDROID`.
+- **Hardware Device Testing Status**: Physical on-device touch and hardware sensor testing remain outstanding until the workflow-generated APK is installed on a physical Android device.
