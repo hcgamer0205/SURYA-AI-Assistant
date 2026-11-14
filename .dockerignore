@@ -1,0 +1,9 @@
+node_modules
+dist
+android
+release-apk
+.git
+.aistudio
+data
+*.log
+.env

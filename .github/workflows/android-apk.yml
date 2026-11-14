@@ -64,9 +64,29 @@ jobs:
         run: |
           npm ci --legacy-peer-deps || npm install --legacy-peer-deps
 
-      - name: Build Web Application
+      - name: Validate TypeScript & Automated Tests
         run: |
+          npm run lint
+          npm test
+
+      - name: Build Web Application
+        env:
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || secrets.VITE_API_BASE_URL }}
+        run: |
+          if [ -n "$VITE_API_BASE_URL" ]; then
+            echo "Embedding configured VITE_API_BASE_URL for Android APK build."
+            if echo "$VITE_API_BASE_URL" | grep -qiE "ais-dev-|ais-pre-"; then
+              echo "::error::VITE_API_BASE_URL points to an authenticated AI Studio preview host ($VITE_API_BASE_URL) which rejects Android APK requests. Configure an independent public Cloud Run backend URL."
+              exit 1
+            fi
+          else
+            echo "::warning::VITE_API_BASE_URL is not set in repository variables/secrets. Operators must enter the backend HTTPS URL inside System > Health > Backend Server Gateway after installing the APK."
+          fi
           npm run build
+          if grep -rnE "AIza[0-9A-Za-z_-]{20,}" dist/; then
+            echo "::error::Potential Google API key detected inside built dist/ assets!"
+            exit 1
+          fi
 
       - name: Verify Capacitor Config & Copy Assets
         run: |

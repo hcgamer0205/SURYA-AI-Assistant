@@ -1,12 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import {
-  Cpu,
-  MessageSquare,
-  Crosshair,
-  CheckSquare,
-  Code2,
-  Activity,
-} from 'lucide-react';
+import { Home, MessageSquare, Eye, LayoutGrid } from 'lucide-react';
 import { TabType } from '../types/surya';
 import { soundFx } from '../services/soundFx';
 import { uiThemeEngine } from '../services/uiThemeEngine';
@@ -17,6 +10,16 @@ interface NavigationProps {
   onSelectTab: (tab: TabType) => void;
 }
 
+const MORE_CHILD_TABS: TabType[] = [
+  'more',
+  'productivity',
+  'studio',
+  'system',
+  'hub',
+  'plugins',
+  'security',
+];
+
 export const Navigation: React.FC<NavigationProps> = ({ currentTab, onSelectTab }) => {
   const [theme, setTheme] = useState<SuryaThemeConfig>(uiThemeEngine.getCurrentTheme());
 
@@ -25,27 +28,28 @@ export const Navigation: React.FC<NavigationProps> = ({ currentTab, onSelectTab 
     return () => unsub();
   }, []);
 
-  const tabs = [
-    { id: 'core' as TabType, label: 'CORE', icon: Cpu },
-    { id: 'chat' as TabType, label: 'CHAT', icon: MessageSquare },
-    { id: 'optics' as TabType, label: 'OPTICS', icon: Crosshair },
-    { id: 'productivity' as TabType, label: 'TASKS', icon: CheckSquare },
-    { id: 'studio' as TabType, label: 'STUDIO', icon: Code2 },
-    { id: 'system' as TabType, label: 'SYSTEM', icon: Activity },
-  ];
-
   const primaryCol = theme.palette.primary;
+
+  const tabs: { id: TabType; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+    { id: 'core', label: 'Home', icon: Home },
+    { id: 'chat', label: 'Chat', icon: MessageSquare },
+    { id: 'optics', label: 'Vision', icon: Eye },
+    { id: 'more', label: 'More', icon: LayoutGrid },
+  ];
 
   return (
     <nav
-      aria-label="SURYA Navigation Dock"
-      className="fixed bottom-0 left-0 right-0 z-40 bg-[#070503]/95 backdrop-blur-xl border-t pb-safe shadow-2xl"
-      style={{ borderColor: `${primaryCol}33` }}
+      aria-label="Primary Navigation"
+      className="fixed bottom-0 left-0 right-0 z-40 border-t border-slate-800/80 bg-[#0d121d]/95 backdrop-blur-lg pb-safe"
     >
-      <div className="max-w-2xl mx-auto grid grid-cols-6 items-center h-16 px-1">
+      <div className="max-w-lg mx-auto grid grid-cols-4 items-center h-14 px-2">
         {tabs.map((tab) => {
           const Icon = tab.icon;
-          const isActive = currentTab === tab.id;
+          const isActive =
+            tab.id === 'more'
+              ? MORE_CHILD_TABS.includes(currentTab)
+              : currentTab === tab.id;
+
           return (
             <button
               key={tab.id}
@@ -53,25 +57,14 @@ export const Navigation: React.FC<NavigationProps> = ({ currentTab, onSelectTab 
                 soundFx.playClick();
                 onSelectTab(tab.id);
               }}
-              className={`flex flex-col items-center justify-center min-h-[44px] py-1 transition-all active:scale-90 ${
-                isActive
-                  ? 'font-bold'
-                  : 'text-slate-400 hover:text-slate-200'
+              aria-current={isActive ? 'page' : undefined}
+              className={`flex flex-col items-center justify-center min-h-[44px] py-1 rounded-xl transition-colors active:scale-95 ${
+                isActive ? 'font-semibold' : 'text-slate-400 hover:text-slate-200'
               }`}
               style={{ color: isActive ? primaryCol : undefined }}
             >
-              <div className="relative">
-                <Icon className={`w-5 h-5 transition-transform ${isActive ? 'scale-110' : ''}`} />
-                {isActive && (
-                  <span
-                    className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full shadow-sm"
-                    style={{ backgroundColor: primaryCol, boxShadow: `0 0 6px ${primaryCol}` }}
-                  />
-                )}
-              </div>
-              <span className="text-[9px] font-mono tracking-tight mt-1 truncate">
-                {tab.label}
-              </span>
+              <Icon className="w-[18px] h-[18px]" />
+              <span className="text-[11px] mt-1 tracking-tight leading-none">{tab.label}</span>
             </button>
           );
         })}

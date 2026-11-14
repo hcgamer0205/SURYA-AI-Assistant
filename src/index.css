@@ -4,11 +4,10 @@
 @theme {
   --font-sans: 'Outfit', 'Noto Sans Devanagari', 'Noto Sans Arabic', 'Noto Sans JP', 'Noto Sans Tamil', 'Noto Sans Telugu', 'Plus Jakarta Sans', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
-  --color-solar-gold: #fbbf24;
-  --color-solar-amber: #f59e0b;
-  --color-solar-flare: #ff5500;
-  --color-cyan-glow: #00f0ff;
-  --color-hud-bg: #070b14;
+  --color-surya-gold: #d4a84f;
+  --color-surya-blue: #60a5fa;
+  --color-hud-bg: #0b0f17;
+  --color-hud-surface: #121826;
 }
 
 :root {
@@ -23,35 +22,21 @@
 
 /* Mobile Safe Areas */
 .pb-safe {
-  padding-bottom: env(safe-area-inset-bottom, 16px);
+  padding-bottom: env(safe-area-inset-bottom, 12px);
 }
 .pt-safe {
-  padding-top: env(safe-area-inset-top, 16px);
+  padding-top: env(safe-area-inset-top, 12px);
 }
 
-/* Futuristic Scanline & Grid Effect */
-.bg-cyber-grid {
-  background-image:
-    linear-gradient(rgba(0, 240, 255, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 240, 255, 0.03) 1px, transparent 1px);
-  background-size: 24px 24px;
-}
-
-.bg-cyber-radial {
-  background: radial-gradient(circle at 50% 20%, rgba(0, 240, 255, 0.12) 0%, rgba(7, 11, 20, 0.95) 70%, #050811 100%);
-}
-
-/* Pulse Glow Keyframes */
+/* Subtle restrained animations */
 @keyframes core-pulse {
   0%, 100% {
     transform: scale(1);
-    opacity: 0.85;
-    filter: drop-shadow(0 0 16px rgba(0, 240, 255, 0.6));
+    opacity: 0.9;
   }
   50% {
-    transform: scale(1.04);
+    transform: scale(1.03);
     opacity: 1;
-    filter: drop-shadow(0 0 28px rgba(0, 240, 255, 0.9));
   }
 }
 
@@ -73,29 +58,16 @@
   }
 }
 
-@keyframes scan-line {
-  0% {
-    transform: translateY(-100%);
-  }
-  100% {
-    transform: translateY(1000%);
-  }
-}
-
 .animate-core-pulse {
-  animation: core-pulse 3s ease-in-out infinite;
+  animation: core-pulse 3.6s ease-in-out infinite;
 }
 
 .animate-spin-slow {
-  animation: spin-slow 24s linear infinite;
+  animation: spin-slow 36s linear infinite;
 }
 
 .animate-spin-reverse-slow {
-  animation: spin-reverse-slow 18s linear infinite;
-}
-
-.animate-scan-line {
-  animation: scan-line 4s linear infinite;
+  animation: spin-reverse-slow 28s linear infinite;
 }
 
 /* Reduced Motion Accessibility Support */
@@ -117,7 +89,7 @@
 
 /* High Contrast Accessibility Enhancement */
 [data-surya-high-contrast="true"] {
-  --color-surya-border: rgba(251, 191, 36, 0.7);
+  --color-surya-border: rgba(212, 168, 79, 0.55);
 }
 
 /* Hide scrollbars on horizontal chips */
@@ -129,21 +101,21 @@
   scrollbar-width: none;
 }
 
-/* Custom Scrollbar */
+/* Restrained Scrollbar */
 ::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
-  background: rgba(7, 11, 20, 0.5);
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 240, 255, 0.2);
-  border-radius: 2px;
+  background: rgba(148, 163, 184, 0.22);
+  border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 240, 255, 0.5);
+  background: rgba(148, 163, 184, 0.4);
 }

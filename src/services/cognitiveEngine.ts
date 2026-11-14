@@ -5,7 +5,10 @@
  */
 
 import { apiService } from './apiService';
+import { deviceCapabilityService } from './deviceCapabilityService';
+import { intelligenceRouter } from './intelligenceRouter';
 import { knowledgeVaultService } from './knowledgeVaultService';
+import { localInferenceRuntime } from './localInferenceRuntime';
 import { personalMemoryService } from './personalMemoryService';
 import { productivityService } from './productivityService';
 
@@ -206,25 +209,39 @@ class CognitiveEngine {
     let subtasks: PlannedSubtask[] = [];
     let summary = '';
 
-    try {
-      const remote = await apiService.orchestrateGoal(goal, memories);
-      if (remote?.success && Array.isArray(remote.plan?.subtasks) && remote.plan.subtasks.length > 0) {
-        subtasks = remote.plan.subtasks.map((st, idx) => ({
-          id: `step_${idx + 1}`,
-          order: st.order || idx + 1,
-          title: st.title,
-          agent: st.agent || 'agent_planning',
-          dependsOn: idx > 0 ? [`step_${idx}`] : [],
-          actionType: (st.actionType as StepActionType) || 'none',
-          actionPayload: st.actionPayload || goal,
-          requiresApproval: Boolean(st.requiresApproval),
-          status: 'pending',
-          verified: false,
-        }));
-        summary = remote.plan.summary || `Synthesized ${subtasks.length}-step plan for "${goal}".`;
+    const status = intelligenceRouter.getEffectiveStatus();
+    if (status.activePath === 'cloud-gemini') {
+      try {
+        const remote = await apiService.orchestrateGoal(goal, memories);
+        if (remote?.success && Array.isArray(remote.plan?.subtasks) && remote.plan.subtasks.length > 0) {
+          subtasks = remote.plan.subtasks.map((st, idx) => ({
+            id: `step_${idx + 1}`,
+            order: st.order || idx + 1,
+            title: st.title,
+            agent: st.agent || 'agent_planning',
+            dependsOn: idx > 0 ? [`step_${idx}`] : [],
+            actionType: (st.actionType as StepActionType) || 'none',
+            actionPayload: st.actionPayload || goal,
+            requiresApproval: Boolean(st.requiresApproval),
+            status: 'pending',
+            verified: false,
+          }));
+          summary = remote.plan.summary || `Synthesized ${subtasks.length}-step plan for "${goal}".`;
+        }
+      } catch {
+        // Deterministic offline decomposition fallback
       }
-    } catch {
-      // Deterministic offline decomposition fallback
+    } else if (status.localReady) {
+      try {
+        const localRes = await localInferenceRuntime.generateResponse(
+          `Create a concise 3-step summary plan for: "${goal}". Output plain bullet points only.`
+        );
+        if (localRes.text) {
+          summary = `On-Device Plan (${localRes.modelName}): ${localRes.text.slice(0, 220)}`;
+        }
+      } catch {
+        // Fall through cleanly to deterministic local staging
+      }
     }
 
     if (subtasks.length === 0) {
@@ -518,18 +535,43 @@ class CognitiveEngine {
     }
 
     if (action === 'health_check') {
-      const health = await apiService.getSystemHealth();
-      step.status = 'succeeded';
-      step.result = `Backend ${health.status} · Model ${health.activeModel} · Gemini ${health.geminiConfigured ? 'configured' : 'missing key'}.`;
-      step.verified = health.status === 'ONLINE' || health.status === 'ok';
+      const routerStatus = intelligenceRouter.getEffectiveStatus();
+      if (routerStatus.activePath === 'cloud-gemini') {
+        const health = await apiService.getSystemHealth();
+        step.status = 'succeeded';
+        step.result = `Cloud Backend ${health.status} · Model ${health.activeModel} · Gemini ${health.geminiConfigured ? 'configured' : 'missing key'}.`;
+        step.verified = health.status === 'ONLINE' || health.status === 'ok';
+      } else {
+        const hw = deviceCapabilityService.getSnapshot();
+        const rt = localInferenceRuntime.getState();
+        step.status = 'succeeded';
+        step.result = `Offline Diagnostics (${hw.platform}) · Mode: ${routerStatus.mode} · Local LLM: ${rt.activeModelName || 'None loaded'} · RAM free: ${hw.availableRamMb ?? '?'} MB.`;
+        step.verified = true;
+      }
       return;
     }
 
     if (action === 'studio_scaffold') {
-      const generated = await apiService.generateStudioApp(payload, 'Agent Studio App', 'Productivity');
-      step.status = 'succeeded';
-      step.result = `Generated "${generated.app.name}" (${generated.app.files.length} file(s)).`;
-      step.verified = Boolean(generated.app.previewHtml && generated.app.previewHtml.length > 40);
+      const routerStatus = intelligenceRouter.getEffectiveStatus();
+      if (routerStatus.activePath === 'cloud-gemini') {
+        const generated = await apiService.generateStudioApp(payload, 'Agent Studio App', 'Productivity');
+        step.status = 'succeeded';
+        step.result = `Generated "${generated.app.name}" (${generated.app.files.length} file(s)).`;
+        step.verified = Boolean(generated.app.previewHtml && generated.app.previewHtml.length > 40);
+        return;
+      }
+      if (routerStatus.localReady) {
+        const localCode = await localInferenceRuntime.generateResponse(
+          `Generate a minimal standalone HTML5 widget for "${payload}" and explain it in one sentence.`
+        );
+        step.status = 'succeeded';
+        step.result = `On-device Studio draft prepared (${localCode.modelName}): ${localCode.text.slice(0, 140)}...`;
+        step.verified = Boolean(localCode.text);
+        return;
+      }
+      step.status = 'failed';
+      step.result = 'Offline Studio AI scaffolding requires either online connectivity or a downloaded local AI model.';
+      step.verified = false;
       return;
     }
 

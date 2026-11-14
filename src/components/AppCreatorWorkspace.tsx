@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Code2,
   Download,
   Sparkles,
   FileCode,
@@ -14,6 +13,8 @@ import {
 } from 'lucide-react';
 import { GeneratedApp, GithubRepoSummary, StudioVersionSnapshot } from '../types/surya';
 import { apiService } from '../services/apiService';
+import { intelligenceRouter } from '../services/intelligenceRouter';
+import { localInferenceRuntime } from '../services/localInferenceRuntime';
 import { soundFx } from '../services/soundFx';
 
 export const AppCreatorWorkspace: React.FC = () => {
@@ -53,11 +54,10 @@ export const AppCreatorWorkspace: React.FC = () => {
         setCurrentApp((prev) => prev || res.apps[0]);
       }
     } catch {
-      // Offline local fallback app
       const fallback: GeneratedApp = {
         id: 'app_local_starter',
-        name: 'SURYA Quick Counter Workspace',
-        description: 'Local offline Studio workspace ready for editing and preview.',
+        name: 'Quick Counter Starter',
+        description: 'Local starter workspace ready for live preview and editing.',
         category: 'Productivity',
         version: '1.0.0',
         prompt: 'Starter counter app',
@@ -71,11 +71,11 @@ export const AppCreatorWorkspace: React.FC = () => {
             content: `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>SURYA App</title><script src="https://cdn.tailwindcss.com"></script></head>
-<body class="bg-slate-950 text-amber-100 p-6 font-sans">
-  <h1 class="text-lg font-bold text-amber-400">SURYA Studio Runtime</h1>
-  <p class="text-xs text-slate-400 mt-1">Edit code live or generate a new app using Gemini above.</p>
-  <button onclick="document.getElementById('out').innerText = 'Action fired at ' + new Date().toLocaleTimeString()" class="mt-4 px-4 py-2 rounded-lg bg-amber-500 text-slate-950 font-bold text-xs">Test Interaction</button>
-  <p id="out" class="mt-3 text-xs font-mono text-cyan-300"></p>
+<body class="bg-slate-950 text-slate-100 p-6 font-sans">
+  <h1 class="text-lg font-semibold text-amber-300">SURYA Studio Preview</h1>
+  <p class="text-xs text-slate-400 mt-1">Describe an app above to build with Gemini, or edit source in the Code tab.</p>
+  <button onclick="document.getElementById('out').innerText = 'Updated at ' + new Date().toLocaleTimeString()" class="mt-4 px-4 py-2 rounded-lg bg-amber-400 text-slate-950 font-medium text-xs">Test Interaction</button>
+  <p id="out" class="mt-3 text-xs font-mono text-blue-300"></p>
 </body>
 </html>`,
           },
@@ -99,25 +99,63 @@ export const AppCreatorWorkspace: React.FC = () => {
     setVersionHistory((prev) => [snap, ...prev].slice(0, 10));
   };
 
+  const extractHtmlBlock = (raw: string): string => {
+    const fenced = raw.match(/```(?:html)?\s*([\s\S]*?)```/i);
+    if (fenced && fenced[1].trim()) return fenced[1].trim();
+    return raw.trim();
+  };
+
   const handleGenerateApp = async (templatePrompt?: string) => {
     const prompt = (templatePrompt || promptInput).trim();
     if (!prompt || isGenerating) return;
 
     soundFx.playClick();
     setIsGenerating(true);
-    setStatusMessage('Synthesizing application with Gemini...');
+    const routerSnap = intelligenceRouter.getEffectiveStatus();
+    const useLocal = routerSnap.mode === 'offline' || !routerSnap.networkOnline;
+    setStatusMessage(
+      useLocal ? 'Generating app locally with active on-device model...' : 'Creating application with Gemini...'
+    );
     setDebugDiagnosis(null);
     setSandboxErrors([]);
 
     try {
       const appName = templatePrompt || prompt.slice(0, 36);
+      if (useLocal) {
+        const localOut = await localInferenceRuntime.generateResponse(
+          `Return ONLY a complete single-file HTML5 app with inline Tailwind/CSS and vanilla JS for: ${prompt}`
+        );
+        const html = extractHtmlBlock(localOut.text);
+        const generated: GeneratedApp = {
+          id: `app_local_${Date.now()}`,
+          name: appName,
+          description: `Generated offline by ${localOut.modelName}`,
+          category: 'Offline Studio',
+          version: '1.0.0',
+          prompt,
+          status: 'ready',
+          createdAt: new Date().toISOString(),
+          lastModified: new Date().toISOString(),
+          files: [{ path: 'index.html', language: 'html', content: html }],
+          previewHtml: html,
+        };
+        if (currentApp) pushSnapshot(currentApp, `Before "${appName}"`);
+        setCurrentApp(generated);
+        setApps((prev) => [generated, ...prev]);
+        setSelectedFileIdx(0);
+        setPromptInput('');
+        setStatusMessage(`Created "${generated.name}" locally (${localOut.modelName}).`);
+        soundFx.playAuthorize();
+        return;
+      }
+
       const res = await apiService.generateStudioApp(prompt, appName, 'Custom');
       if (currentApp) pushSnapshot(currentApp, `Before "${appName}"`);
       setCurrentApp(res.app);
       setApps((prev) => [res.app, ...prev.filter((a) => a.id !== res.app.id)]);
       setSelectedFileIdx(0);
       setPromptInput('');
-      setStatusMessage(res.message || `Generated ${res.app.name}`);
+      setStatusMessage(res.message || `Created ${res.app.name}`);
       soundFx.playAuthorize();
     } catch (err: any) {
       soundFx.playAbort();
@@ -131,18 +169,42 @@ export const AppCreatorWorkspace: React.FC = () => {
     if (!currentApp || !modifyInput.trim() || isGenerating) return;
     soundFx.playClick();
     setIsGenerating(true);
-    setStatusMessage('Applying AI modification...');
+    setStatusMessage('Updating application...');
     pushSnapshot(currentApp, `Before edit: "${modifyInput.slice(0, 30)}"`);
 
+    const routerSnap = intelligenceRouter.getEffectiveStatus();
+    const useLocal = routerSnap.mode === 'offline' || !routerSnap.networkOnline;
+
     try {
+      if (useLocal) {
+        const currentHtml = currentApp.files[0]?.content || currentApp.previewHtml || '';
+        const localOut = await localInferenceRuntime.generateResponse(
+          `Update this HTML app according to: "${modifyInput.trim()}". Return ONLY the updated complete HTML.\n\n${currentHtml}`
+        );
+        const patched = extractHtmlBlock(localOut.text);
+        const updatedFiles = currentApp.files.map((f, idx) =>
+          idx === 0 ? { ...f, content: patched } : f
+        );
+        setCurrentApp({
+          ...currentApp,
+          files: updatedFiles,
+          previewHtml: patched,
+          lastModified: new Date().toISOString(),
+        });
+        setModifyInput('');
+        setStatusMessage(`Updated locally (${localOut.modelName}).`);
+        soundFx.playAuthorize();
+        return;
+      }
+
       const res = await apiService.modifyStudioApp(currentApp.id, modifyInput.trim());
       setCurrentApp(res.app);
       setModifyInput('');
-      setStatusMessage('Application updated via Gemini.');
+      setStatusMessage('Application updated.');
       soundFx.playAuthorize();
     } catch (err: any) {
       soundFx.playAbort();
-      setStatusMessage(`Modify error: ${err?.message || 'Failed'}`);
+      setStatusMessage(`Update failed: ${err?.message || 'Failed'}`);
     } finally {
       setIsGenerating(false);
     }
@@ -169,11 +231,39 @@ export const AppCreatorWorkspace: React.FC = () => {
 
     soundFx.playClick();
     setIsDebugging(true);
-    setStatusMessage('Analyzing code with SURYA AI Debugger...');
+    setStatusMessage('Checking code with AI Debugger...');
+
+    const routerSnap = intelligenceRouter.getEffectiveStatus();
+    const useLocal = routerSnap.mode === 'offline' || !routerSnap.networkOnline;
 
     try {
+      if (useLocal) {
+        const localOut = await localInferenceRuntime.generateResponse(
+          `Inspect and fix any JavaScript or HTML issues (${sandboxErrors.join('; ') || 'none reported'}). Return corrected HTML.\n\n${htmlSource}`
+        );
+        const patched = extractHtmlBlock(localOut.text);
+        pushSnapshot(currentApp, 'Before Local AI Debug');
+        const updatedFiles = currentApp.files.map((f, idx) =>
+          idx === 0 ? { ...f, content: patched } : f
+        );
+        setCurrentApp({
+          ...currentApp,
+          files: updatedFiles,
+          previewHtml: patched,
+          lastModified: new Date().toISOString(),
+        });
+        setDebugDiagnosis({
+          diagnosis: `Inspected locally via ${localOut.modelName}`,
+          fixes: ['Applied local code review suggestions'],
+        });
+        setSandboxErrors([]);
+        setStatusMessage('Local debug review applied.');
+        soundFx.playAuthorize();
+        return;
+      }
+
       const res = await apiService.debugStudioApp(htmlSource, sandboxErrors.join('\n'), currentApp.description);
-      pushSnapshot(currentApp, 'Before AI Debug Patch');
+      pushSnapshot(currentApp, 'Before AI Debug Fix');
       const updatedFiles = currentApp.files.map((f, idx) =>
         idx === 0 ? { ...f, content: res.patchedHtml } : f
       );
@@ -185,7 +275,7 @@ export const AppCreatorWorkspace: React.FC = () => {
       });
       setDebugDiagnosis({ diagnosis: res.diagnosis, fixes: res.fixes });
       setSandboxErrors([]);
-      setStatusMessage('AI Debugger applied verified fixes.');
+      setStatusMessage('Debug fixes applied.');
       soundFx.playAuthorize();
     } catch (err: any) {
       soundFx.playAbort();
@@ -206,7 +296,7 @@ export const AppCreatorWorkspace: React.FC = () => {
       files: updatedFiles,
       previewHtml: snap.previewHtml,
     });
-    setStatusMessage(`Rolled back to snapshot from ${new Date(snap.timestamp).toLocaleTimeString()}`);
+    setStatusMessage(`Restored snapshot from ${new Date(snap.timestamp).toLocaleTimeString()}`);
   };
 
   const handleExportHtml = () => {
@@ -220,11 +310,16 @@ export const AppCreatorWorkspace: React.FC = () => {
     a.download = `${currentApp.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.html`;
     a.click();
     URL.revokeObjectURL(url);
-    setStatusMessage('Exported standalone HTML bundle.');
+    setStatusMessage('Exported standalone HTML file.');
   };
 
   const handleInspectGithub = async () => {
     if (!repoInput.trim()) return;
+    const routerSnap = intelligenceRouter.getEffectiveStatus();
+    if (routerSnap.mode === 'offline' || !routerSnap.networkOnline) {
+      setStatusMessage('GitHub repository inspection is an Online-Only feature and requires internet access.');
+      return;
+    }
     soundFx.playClick();
     setIsLoadingGithub(true);
     try {
@@ -233,7 +328,7 @@ export const AppCreatorWorkspace: React.FC = () => {
       soundFx.playAuthorize();
     } catch (err: any) {
       soundFx.playAbort();
-      setStatusMessage(`GitHub Error: ${err?.message}`);
+      setStatusMessage(`GitHub error: ${err?.message}`);
     } finally {
       setIsLoadingGithub(false);
     }
@@ -246,123 +341,137 @@ export const AppCreatorWorkspace: React.FC = () => {
     : `${errorBridgeScript}${rawHtml}`;
 
   return (
-    <div className="flex flex-col h-full w-full max-w-5xl mx-auto p-4 space-y-4 pb-24">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-500/30 pb-2.5">
-        <div className="flex items-center gap-2">
-          <Code2 className="w-5 h-5 text-amber-400" />
-          <div>
-            <h2 className="text-sm font-mono font-bold tracking-wider text-amber-300 uppercase">
-              SURYA STUDIO — AI APP BUILDER &amp; GITHUB MONITOR
-            </h2>
-            <span className="text-[10px] text-slate-400">
-              Real Gemini code generation · Editable multi-file explorer · Sandboxed runtime · AI Debugger
-            </span>
-          </div>
+    <div className="flex flex-col w-full max-w-4xl mx-auto px-4 py-4 space-y-4 pb-24">
+      {/* Clean Header */}
+      <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-800/80">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-100">SURYA Studio</h2>
+          <p className="text-xs text-slate-400">Create apps, preview live, or check GitHub builds</p>
         </div>
         <div className="flex items-center gap-1.5">
-          {(['preview', 'code', 'github'] as const).map((t) => (
+          {(
+            [
+              { id: 'preview', label: 'Preview' },
+              { id: 'code', label: 'Code' },
+              { id: 'github', label: 'GitHub' },
+            ] as const
+          ).map((t) => (
             <button
-              key={t}
+              key={t.id}
+              type="button"
               onClick={() => {
                 soundFx.playClick();
-                setStudioTab(t);
-                if (t === 'github' && !githubData) handleInspectGithub();
+                setStudioTab(t.id);
+                if (t.id === 'github' && !githubData) handleInspectGithub();
               }}
-              className={`min-h-[34px] px-3 py-1 rounded-lg font-mono text-[11px] font-bold uppercase ${
-                studioTab === t ? 'bg-amber-500 text-slate-950' : 'bg-slate-900 border border-slate-700 text-slate-300'
+              className={`min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-medium transition-colors ${
+                studioTab === t.id
+                  ? 'bg-[#d4a84f] text-slate-950 font-semibold'
+                  : 'bg-[#121826] border border-slate-800 text-slate-300 hover:border-slate-700'
               }`}
             >
-              {t}
+              {t.label}
             </button>
           ))}
         </div>
       </div>
 
-      {/* Prompt Generator Bar */}
-      <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-2.5">
+      {/* Create App & Recent Projects */}
+      <div className="p-4 rounded-2xl bg-[#121826] border border-slate-800/80 space-y-3">
         <div className="flex flex-wrap gap-2">
           <input
             type="text"
             value={promptInput}
             onChange={(e) => setPromptInput(e.target.value)}
-            placeholder="Describe a new app to build with Gemini (e.g. Pomodoro timer with task list)..."
-            className="flex-1 min-w-[220px] px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-amber-400"
+            placeholder="Describe an app to create..."
+            className="flex-1 min-w-[200px] min-h-[42px] px-3.5 py-2 rounded-xl bg-[#0b0f17] border border-slate-800 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-[#d4a84f]"
           />
           <button
+            type="button"
             onClick={() => handleGenerateApp()}
             disabled={isGenerating || !promptInput.trim()}
-            className="min-h-[40px] px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-mono text-xs font-bold flex items-center gap-1.5"
+            className="min-h-[42px] px-4 py-2 rounded-xl bg-[#d4a84f] hover:bg-[#e0b65f] disabled:opacity-40 text-slate-950 text-xs font-semibold flex items-center gap-1.5"
           >
             {isGenerating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-            <span>{isGenerating ? 'GENERATING...' : 'BUILD APP'}</span>
+            <span>{isGenerating ? 'Creating...' : 'Create App'}</span>
           </button>
         </div>
 
-        {/* Saved Projects Switcher */}
-        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
-          {apps.map((appItem) => (
-            <button
-              key={appItem.id}
-              onClick={() => {
-                soundFx.playClick();
-                setCurrentApp(appItem);
-                setSelectedFileIdx(0);
-              }}
-              className={`px-2.5 py-1 rounded-lg text-[10px] font-mono whitespace-nowrap border ${
-                currentApp?.id === appItem.id
-                  ? 'bg-amber-500/20 border-amber-500 text-amber-200'
-                  : 'bg-slate-950 border-slate-800 text-slate-400'
-              }`}
-            >
-              {appItem.name}
-            </button>
-          ))}
-        </div>
+        {/* My Projects / Recent Projects */}
+        {apps.length > 0 && (
+          <div className="space-y-1.5">
+            <span className="text-xs text-slate-400 block">Recent Projects</span>
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+              {apps.map((appItem) => (
+                <button
+                  key={appItem.id}
+                  type="button"
+                  onClick={() => {
+                    soundFx.playClick();
+                    setCurrentApp(appItem);
+                    setSelectedFileIdx(0);
+                  }}
+                  className={`min-h-[34px] px-3 py-1 rounded-xl text-xs whitespace-nowrap border transition-colors ${
+                    currentApp?.id === appItem.id
+                      ? 'bg-[#1a2438] border-[#d4a84f]/60 text-slate-100 font-medium'
+                      : 'bg-[#0b0f17] border-slate-800 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {appItem.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {statusMessage && (
-        <div className="px-3 py-2 rounded-xl bg-amber-950/40 border border-amber-500/40 text-xs font-mono text-amber-200">
+        <div className="px-3.5 py-2.5 rounded-xl bg-[#121826] border border-slate-800 text-xs text-slate-200">
           {statusMessage}
         </div>
       )}
 
-      {/* TAB 1: PREVIEW */}
+      {/* PREVIEW TAB */}
       {studioTab === 'preview' && currentApp && (
         <div className="space-y-3">
-          <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 flex flex-wrap items-center justify-between gap-2">
+          <div className="p-3.5 rounded-2xl bg-[#121826] border border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
             <div>
-              <h3 className="text-sm font-bold text-slate-100">{currentApp.name}</h3>
-              <p className="text-[11px] text-slate-400">{currentApp.description}</p>
+              <h3 className="text-sm font-semibold text-slate-100">{currentApp.name}</h3>
+              <p className="text-xs text-slate-400">{currentApp.description}</p>
             </div>
             <div className="flex items-center gap-2">
               <button
+                type="button"
                 onClick={handleAIDebug}
                 disabled={isDebugging}
-                className="min-h-[36px] px-3 py-1.5 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 font-mono text-xs font-bold flex items-center gap-1.5"
+                className="min-h-[36px] px-3 py-1.5 rounded-xl bg-[#0b0f17] border border-slate-700 hover:border-slate-600 text-[#60a5fa] text-xs font-medium flex items-center gap-1.5"
               >
                 <Bug className={`w-3.5 h-3.5 ${isDebugging ? 'animate-spin' : ''}`} />
-                <span>{isDebugging ? 'DEBUGGING...' : 'AI DEBUG'}</span>
+                <span>{isDebugging ? 'Checking...' : 'AI Debug'}</span>
               </button>
               <button
+                type="button"
                 onClick={handleExportHtml}
-                className="min-h-[36px] px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-amber-300 font-mono text-xs font-bold flex items-center gap-1.5"
+                className="min-h-[36px] px-3 py-1.5 rounded-xl bg-[#0b0f17] border border-slate-700 hover:border-slate-600 text-[#d4a84f] text-xs font-medium flex items-center gap-1.5"
               >
                 <Download className="w-3.5 h-3.5" />
-                <span>EXPORT HTML</span>
+                <span>Export HTML</span>
               </button>
             </div>
           </div>
 
           {sandboxErrors.length > 0 && (
-            <div className="p-2.5 rounded-xl bg-rose-950/40 border border-rose-500/40 text-[11px] font-mono text-rose-200">
-              Runtime Errors Captured: {sandboxErrors.join(' | ')}
+            <div className="p-3 rounded-xl bg-rose-950/35 border border-rose-500/30 text-xs text-rose-200">
+              Runtime errors: {sandboxErrors.join(' | ')}
             </div>
           )}
 
           {debugDiagnosis && (
-            <div className="p-3 rounded-xl bg-emerald-950/30 border border-emerald-500/40 text-xs space-y-1">
-              <span className="font-mono font-bold text-emerald-300 block">DIAGNOSIS: {debugDiagnosis.diagnosis}</span>
-              <ul className="list-disc pl-4 text-slate-300 text-[11px]">
+            <div className="p-3.5 rounded-xl bg-emerald-950/30 border border-emerald-500/30 text-xs space-y-1">
+              <span className="font-medium text-emerald-300 block">
+                Diagnosis: {debugDiagnosis.diagnosis}
+              </span>
+              <ul className="list-disc pl-4 text-slate-300">
                 {debugDiagnosis.fixes.map((f, idx) => (
                   <li key={idx}>{f}</li>
                 ))}
@@ -370,47 +479,50 @@ export const AppCreatorWorkspace: React.FC = () => {
             </div>
           )}
 
-          <div className="rounded-2xl border border-slate-800 overflow-hidden bg-slate-950 shadow-2xl h-80">
+          <div className="rounded-2xl border border-slate-800 overflow-hidden bg-[#070a12] h-80">
             <iframe
               srcDoc={instrumentedHtml}
               sandbox="allow-scripts"
-              title="SURYA Studio Sandboxed Preview"
+              title="SURYA Studio Preview"
               className="w-full h-full border-0"
             />
           </div>
 
-          {/* Modify Existing App Bar */}
           <div className="flex gap-2">
             <input
               type="text"
               value={modifyInput}
               onChange={(e) => setModifyInput(e.target.value)}
-              placeholder="Modify current app (e.g. Add dark/light toggle or export CSV button)..."
-              className="flex-1 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-xs text-slate-100"
+              placeholder="Ask SURYA to update this app..."
+              className="flex-1 min-h-[42px] px-3.5 py-2 rounded-xl bg-[#121826] border border-slate-800 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-[#d4a84f]"
             />
             <button
+              type="button"
               onClick={handleModifyApp}
               disabled={isGenerating || !modifyInput.trim()}
-              className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-amber-500/40 text-amber-300 font-mono text-xs font-bold flex items-center gap-1.5"
+              className="min-h-[42px] px-4 py-2 rounded-xl bg-[#121826] hover:bg-slate-800 border border-slate-700 disabled:opacity-40 text-slate-200 text-xs font-medium flex items-center gap-1.5"
             >
-              <Wrench className="w-3.5 h-3.5" />
-              <span>ITERATE</span>
+              <Wrench className="w-3.5 h-3.5 text-[#d4a84f]" />
+              <span>Update</span>
             </button>
           </div>
         </div>
       )}
 
-      {/* TAB 2: MULTI-FILE CODE EDITOR & VERSION HISTORY */}
+      {/* CODE TAB */}
       {studioTab === 'code' && currentApp && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-          <div className="lg:col-span-2 p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+          <div className="lg:col-span-2 p-3.5 rounded-2xl bg-[#121826] border border-slate-800 space-y-2.5">
             <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
               {currentApp.files.map((f, idx) => (
                 <button
                   key={f.path}
+                  type="button"
                   onClick={() => setSelectedFileIdx(idx)}
-                  className={`px-2.5 py-1 rounded-lg font-mono text-[11px] flex items-center gap-1 ${
-                    selectedFileIdx === idx ? 'bg-amber-500 text-slate-950 font-bold' : 'bg-slate-900 text-slate-300'
+                  className={`px-3 py-1 rounded-lg font-mono text-xs flex items-center gap-1 ${
+                    selectedFileIdx === idx
+                      ? 'bg-[#d4a84f] text-slate-950 font-semibold'
+                      : 'bg-[#0b0f17] text-slate-300 border border-slate-800'
                   }`}
                 >
                   <FileCode className="w-3 h-3" />
@@ -423,32 +535,33 @@ export const AppCreatorWorkspace: React.FC = () => {
               value={currentApp.files[selectedFileIdx]?.content || ''}
               onChange={(e) => handleCodeEdit(e.target.value)}
               rows={16}
-              className="w-full p-3 rounded-lg bg-slate-900 border border-slate-800 font-mono text-[11px] text-slate-100 focus:outline-none focus:border-amber-400"
+              className="w-full p-3 rounded-xl bg-[#0b0f17] border border-slate-800 font-mono text-xs text-slate-100 focus:outline-none focus:border-[#d4a84f]"
             />
           </div>
 
-          <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2.5">
-            <div className="flex items-center gap-1.5 text-xs font-mono font-bold text-amber-300">
-              <History className="w-4 h-4" />
-              <span>VERSION HISTORY</span>
+          <div className="p-3.5 rounded-2xl bg-[#121826] border border-slate-800 space-y-2.5">
+            <div className="flex items-center gap-1.5 text-xs font-medium text-slate-200">
+              <History className="w-4 h-4 text-[#d4a84f]" />
+              <span>Version History</span>
             </div>
             {versionHistory.length === 0 ? (
-              <p className="text-[11px] text-slate-400">
-                Snapshots are saved automatically whenever you generate, iterate, or debug an app.
+              <p className="text-xs text-slate-400">
+                Snapshots are saved automatically whenever you generate, update, or debug.
               </p>
             ) : (
               <div className="space-y-2">
                 {versionHistory.map((snap) => (
-                  <div key={snap.id} className="p-2 rounded-lg bg-slate-950 border border-slate-800 space-y-1">
-                    <span className="text-[11px] font-semibold text-slate-200 block">{snap.note}</span>
-                    <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+                  <div key={snap.id} className="p-2.5 rounded-xl bg-[#0b0f17] border border-slate-800 space-y-1">
+                    <span className="text-xs font-medium text-slate-200 block">{snap.note}</span>
+                    <div className="flex items-center justify-between text-[11px] text-slate-400 tabular-nums">
                       <span>{new Date(snap.timestamp).toLocaleTimeString()}</span>
                       <button
+                        type="button"
                         onClick={() => handleRollback(snap)}
-                        className="text-amber-300 hover:underline flex items-center gap-1"
+                        className="text-[#d4a84f] hover:underline flex items-center gap-1"
                       >
                         <RotateCcw className="w-3 h-3" />
-                        <span>ROLLBACK</span>
+                        <span>Restore</span>
                       </button>
                     </div>
                   </div>
@@ -459,65 +572,66 @@ export const AppCreatorWorkspace: React.FC = () => {
         </div>
       )}
 
-      {/* TAB 3: GITHUB REPOSITORY & BUILD MONITOR */}
+      {/* GITHUB TAB */}
       {studioTab === 'github' && (
-        <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 space-y-4">
+        <div className="p-4 rounded-2xl bg-[#121826] border border-slate-800 space-y-4">
           <div className="flex flex-wrap gap-2">
             <input
               type="text"
               value={repoInput}
               onChange={(e) => setRepoInput(e.target.value)}
-              placeholder="owner/repo (e.g. hcgamer0205/SURYA-AI-Assistant)"
-              className="flex-1 px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs font-mono text-slate-100"
+              placeholder="owner/repo"
+              className="flex-1 min-h-[42px] px-3.5 py-2 rounded-xl bg-[#0b0f17] border border-slate-800 text-xs font-mono text-slate-100"
             />
             <button
+              type="button"
               onClick={handleInspectGithub}
               disabled={isLoadingGithub}
-              className="px-4 py-2 rounded-xl bg-amber-500 text-slate-950 font-mono text-xs font-bold flex items-center gap-1.5"
+              className="min-h-[42px] px-4 py-2 rounded-xl bg-[#d4a84f] text-slate-950 text-xs font-semibold flex items-center gap-1.5"
             >
               <GitBranch className={`w-4 h-4 ${isLoadingGithub ? 'animate-spin' : ''}`} />
-              <span>{isLoadingGithub ? 'INSPECTING...' : 'INSPECT REPO'}</span>
+              <span>{isLoadingGithub ? 'Loading...' : 'Inspect Repo'}</span>
             </button>
           </div>
 
           {githubData && (
             <div className="space-y-4">
-              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between">
+              <div className="p-3.5 rounded-xl bg-[#0b0f17] border border-slate-800 flex items-center justify-between">
                 <div>
-                  <h3 className="text-sm font-bold text-slate-100">{githubData.fullName}</h3>
-                  <p className="text-xs text-slate-400">{githubData.description || 'SURYA Repository'}</p>
+                  <h3 className="text-sm font-semibold text-slate-100">{githubData.fullName}</h3>
+                  <p className="text-xs text-slate-400">{githubData.description || 'Repository'}</p>
                 </div>
                 <a
                   href={githubData.htmlUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 text-amber-300 font-mono text-xs flex items-center gap-1"
+                  className="px-3 py-1.5 rounded-lg bg-[#121826] border border-slate-700 text-[#d4a84f] text-xs flex items-center gap-1"
                 >
-                  <span>OPEN</span>
+                  <span>Open</span>
                   <ExternalLink className="w-3 h-3" />
                 </a>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
-                  <span className="text-xs font-mono font-bold text-cyan-300 block">RECENT COMMITS</span>
+                <div className="p-3.5 rounded-xl bg-[#0b0f17] border border-slate-800 space-y-2">
+                  <span className="text-xs font-medium text-[#60a5fa] block">Recent Commits</span>
                   {githubData.recentCommits.map((c) => (
-                    <div key={c.sha} className="text-[11px] border-b border-slate-800/80 pb-1.5">
-                      <span className="font-mono text-amber-400 mr-1.5">{c.sha}</span>
+                    <div key={c.sha} className="text-xs border-b border-slate-800/70 pb-1.5">
+                      <span className="font-mono text-[#d4a84f] mr-1.5">{c.sha}</span>
                       <span className="text-slate-200">{c.message}</span>
                     </div>
                   ))}
                 </div>
 
-                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
-                  <span className="text-xs font-mono font-bold text-emerald-300 block">ACTIONS WORKFLOW RUNS</span>
+                <div className="p-3.5 rounded-xl bg-[#0b0f17] border border-slate-800 space-y-2">
+                  <span className="text-xs font-medium text-emerald-300 block">Workflow Runs</span>
                   {githubData.recentBuilds.map((b) => (
-                    <div key={b.id} className="text-[11px] border-b border-slate-800/80 pb-1.5 flex items-center justify-between">
+                    <div key={b.id} className="text-xs border-b border-slate-800/70 pb-1.5 flex items-center justify-between">
                       <span className="text-slate-200 truncate pr-2">
                         #{b.runNumber} {b.name}
                       </span>
                       <span
-                        className={`font-mono text-[10px] uppercase shrink-0 ${
+                        className={`text-[11px] shrink-0 ${
                           b.conclusion === 'success' ? 'text-emerald-400' : 'text-amber-300'
                         }`}
                       >

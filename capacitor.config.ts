@@ -1,22 +1,10 @@
-export interface CapacitorConfig {
+interface CapacitorConfig {
   appId: string;
   appName: string;
   webDir: string;
-  server?: {
-    androidScheme?: string;
-    cleartext?: boolean;
-    url?: string;
-  };
-  android?: {
-    buildOptions?: {
-      keystorePath?: string;
-      releaseType?: string;
-    };
-    allowMixedContent?: boolean;
-    captureInput?: boolean;
-    webContentsDebuggingEnabled?: boolean;
-  };
-  plugins?: Record<string, any>;
+  server?: Record<string, unknown>;
+  android?: Record<string, unknown>;
+  plugins?: Record<string, Record<string, unknown>>;
 }
 
 const config: CapacitorConfig = {
@@ -38,10 +26,11 @@ const config: CapacitorConfig = {
   },
   plugins: {
     CapacitorCookies: {
-      enabled: true,
+      enabled: false,
     },
+    // Keep standard Chromium WebView fetch active so ReadableStream SSE and CORS preflight diagnostics work properly.
     CapacitorHttp: {
-      enabled: true,
+      enabled: false,
     },
   },
 };

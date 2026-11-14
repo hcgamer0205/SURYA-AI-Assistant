@@ -190,11 +190,16 @@ class VoiceService {
     this.state.error = null;
 
     const currentLang = voiceProfileManager.getSettings().language || 'en-IN';
+    const preferOffline = typeof navigator !== 'undefined' && !navigator.onLine;
     const nativeBridge = typeof window !== 'undefined' ? (window as any).AndroidSuryaBridge : null;
 
     if (nativeBridge && typeof nativeBridge.startListening === 'function') {
       try {
-        nativeBridge.startListening(currentLang);
+        if (nativeBridge.startListening.length >= 2) {
+          nativeBridge.startListening(currentLang, preferOffline);
+        } else {
+          nativeBridge.startListening(currentLang);
+        }
         this.state.isListening = true;
         this.startAudioSim();
         this.notify();
@@ -369,6 +374,46 @@ class VoiceService {
 
   public getState(): VoiceState {
     return { ...this.state };
+  }
+
+  public getOfflineVoiceReadiness(langCode?: string): {
+    isNative: boolean;
+    ttsReady: boolean;
+    onDeviceSttSupported: boolean;
+    localeSupportedOffline: boolean;
+    note: string;
+  } {
+    const lang = langCode || voiceProfileManager.getSettings().language || 'en-IN';
+    const bridge = typeof window !== 'undefined' ? (window as any).AndroidSuryaBridge : null;
+    if (bridge && typeof bridge.checkOfflineVoiceReadiness === 'function') {
+      try {
+        const parsed = JSON.parse(bridge.checkOfflineVoiceReadiness(lang));
+        return {
+          isNative: true,
+          ttsReady: Boolean(parsed.ttsReady),
+          onDeviceSttSupported: Boolean(parsed.onDeviceSttSupported),
+          localeSupportedOffline: Boolean(parsed.localeSupportedOffline),
+          note: parsed.note || 'Android speech readiness checked.',
+        };
+      } catch {}
+    }
+    return {
+      isNative: false,
+      ttsReady: Boolean(this.synth),
+      onDeviceSttSupported: false,
+      localeSupportedOffline: Boolean(this.synth && this.synth.getVoices().some((v) => v.localService)),
+      note: 'Offline Android voice packs can be managed natively inside the SURYA Android APK.',
+    };
+  }
+
+  public openOfflineVoicePackInstaller(): boolean {
+    const bridge = typeof window !== 'undefined' ? (window as any).AndroidSuryaBridge : null;
+    if (bridge && typeof bridge.openOfflineVoiceDataSettings === 'function') {
+      try {
+        return Boolean(bridge.openOfflineVoiceDataSettings());
+      } catch {}
+    }
+    return false;
   }
 }
 

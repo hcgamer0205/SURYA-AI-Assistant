@@ -1,4 +1,4 @@
-export type TabType = 'core' | 'chat' | 'optics' | 'productivity' | 'studio' | 'system' | 'plugins' | 'hub' | 'security';
+export type TabType = 'core' | 'chat' | 'optics' | 'more' | 'productivity' | 'studio' | 'system' | 'plugins' | 'hub' | 'security';
 
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH';
 export type ResponseMode = 'concise' | 'detailed';
@@ -77,7 +77,9 @@ export interface SystemHealthData {
   targetPlatform: string;
   uptimeSeconds: number;
   geminiConfigured: boolean;
+  authRequired?: boolean;
   activeModel: string;
+  fallbackModel?: string;
   memoryRssMb: number;
   worldModelEntries: number;
   auditLogsCount: number;

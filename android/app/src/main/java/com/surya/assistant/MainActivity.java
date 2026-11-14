@@ -50,19 +50,23 @@ public class MainActivity extends BridgeActivity {
 
     private static final String ALERTS_CHANNEL_ID = "surya_alerts_channel";
     private TextToSpeech tts;
+    private boolean ttsInitialized = false;
     private SpeechRecognizer speechRecognizer;
     private Handler mainHandler;
     private BroadcastReceiver handsFreeStopReceiver;
+    private SuryaOfflineModelService offlineModelService;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         mainHandler = new Handler(Looper.getMainLooper());
+        offlineModelService = new SuryaOfflineModelService(this, this::sendJsEvent);
         createAlertsNotificationChannel();
 
         // Initialize Android TextToSpeech with completion callbacks
         tts = new TextToSpeech(this, status -> {
             if (status == TextToSpeech.SUCCESS) {
+                ttsInitialized = true;
                 tts.setLanguage(Locale.getDefault());
                 tts.setPitch(1.0f);
                 tts.setSpeechRate(1.06f);
@@ -135,6 +139,9 @@ public class MainActivity extends BridgeActivity {
             try {
                 unregisterReceiver(handsFreeStopReceiver);
             } catch (Exception ignored) {}
+        }
+        if (offlineModelService != null) {
+            offlineModelService.destroy();
         }
         if (tts != null) {
             tts.stop();
@@ -397,6 +404,11 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public void startListening(String languageCode) {
+            startListening(languageCode, false);
+        }
+
+        @JavascriptInterface
+        public void startListening(String languageCode, boolean preferOffline) {
             mainHandler.post(() -> {
                 if (ContextCompat.checkSelfPermission(MainActivity.this, android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                     ActivityCompat.requestPermissions(MainActivity.this, new String[]{android.Manifest.permission.RECORD_AUDIO}, 101);
@@ -415,6 +427,7 @@ public class MainActivity extends BridgeActivity {
                 } else {
                     intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag());
                 }
+                intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, preferOffline);
                 intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
                 intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1600L);
                 intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L);
@@ -533,6 +546,97 @@ public class MainActivity extends BridgeActivity {
                 e.printStackTrace();
                 return false;
             }
+        }
+
+        // ---------------- OFFLINE AI MODEL STORE, HARDWARE INTELLIGENCE & VISION ----------------
+
+        @JavascriptInterface
+        public String getHardwareCapabilities() {
+            return offlineModelService != null
+                ? offlineModelService.getHardwareCapabilitiesJson(ttsInitialized)
+                : "{\"error\":\"service_unavailable\"}";
+        }
+
+        @JavascriptInterface
+        public String listDownloadedModels() {
+            return offlineModelService != null ? offlineModelService.listDownloadedModelsJson() : "[]";
+        }
+
+        @JavascriptInterface
+        public String startModelDownload(String modelId, String url, String fileName, String expectedSha256, long expectedBytes) {
+            return offlineModelService != null
+                ? offlineModelService.startModelDownload(modelId, url, fileName, expectedSha256, expectedBytes)
+                : "{\"started\":false,\"error\":\"service_unavailable\"}";
+        }
+
+        @JavascriptInterface
+        public void pauseModelDownload(String modelId) {
+            if (offlineModelService != null) offlineModelService.pauseModelDownload(modelId);
+        }
+
+        @JavascriptInterface
+        public void cancelModelDownload(String modelId) {
+            if (offlineModelService != null) offlineModelService.cancelModelDownload(modelId);
+        }
+
+        @JavascriptInterface
+        public String verifyModelFile(String modelId, String expectedSha256) {
+            return offlineModelService != null
+                ? offlineModelService.verifyModelFileJson(modelId, expectedSha256)
+                : "{\"valid\":false,\"reason\":\"service_unavailable\"}";
+        }
+
+        @JavascriptInterface
+        public String deleteDownloadedModel(String modelId) {
+            return offlineModelService != null
+                ? offlineModelService.deleteModelJson(modelId)
+                : "{\"deleted\":false,\"error\":\"service_unavailable\"}";
+        }
+
+        @JavascriptInterface
+        public String loadLocalModel(String modelId, int minDeviceRamMb, int maxTokens, boolean preferGpu) {
+            return offlineModelService != null
+                ? offlineModelService.loadModelJson(modelId, minDeviceRamMb, maxTokens, preferGpu)
+                : "{\"loaded\":false,\"error\":\"service_unavailable\"}";
+        }
+
+        @JavascriptInterface
+        public void unloadLocalModel() {
+            if (offlineModelService != null) offlineModelService.unloadModel();
+        }
+
+        @JavascriptInterface
+        public String getLocalModelRuntimeState() {
+            return offlineModelService != null ? offlineModelService.getRuntimeStateJson() : "{\"loaded\":false}";
+        }
+
+        @JavascriptInterface
+        public boolean generateLocalLlmResponse(String requestId, String prompt) {
+            return offlineModelService != null && offlineModelService.generateResponseAsync(requestId, prompt);
+        }
+
+        @JavascriptInterface
+        public void cancelLocalLlmGeneration() {
+            if (offlineModelService != null) offlineModelService.cancelGeneration();
+        }
+
+        @JavascriptInterface
+        public String analyzeImageOffline(String base64DataUrl, String mode) {
+            return offlineModelService != null
+                ? offlineModelService.analyzeImageOfflineJson(base64DataUrl, mode)
+                : "{\"error\":\"service_unavailable\"}";
+        }
+
+        @JavascriptInterface
+        public String checkOfflineVoiceReadiness(String langCode) {
+            return offlineModelService != null
+                ? offlineModelService.checkOfflineVoiceReadinessJson(langCode, tts)
+                : "{\"onDeviceSttSupported\":false,\"ttsReady\":false}";
+        }
+
+        @JavascriptInterface
+        public boolean openOfflineVoiceDataSettings() {
+            return offlineModelService != null && offlineModelService.openOfflineVoiceDataSettings();
         }
     }
 

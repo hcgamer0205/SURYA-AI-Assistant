@@ -14,7 +14,6 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-// Security & CORS: Restricted Origin Policy for Capacitor Android & Authorized Web Hosts
 const DEFAULT_ALLOWED_ORIGINS = [
   'https://localhost',
   'http://localhost',
@@ -24,22 +23,24 @@ const DEFAULT_ALLOWED_ORIGINS = [
   'ionic://localhost',
 ];
 
-function isAllowedOrigin(origin: string | undefined): boolean {
-  if (!origin) return true; // Native mobile / curl / server-to-server requests without browser Origin
+function getConfiguredApiToken(): string {
+  return (process.env.SURYA_API_TOKEN || '').trim();
+}
+
+export function isAllowedOrigin(origin: string | undefined): boolean {
+  if (!origin) return true; // Native Android / curl requests without browser Origin header
   const envOrigins = (process.env.ALLOWED_ORIGINS || '')
     .split(',')
-    .map((s) => s.trim())
+    .map((s) => s.trim().replace(/\/+$/, ''))
     .filter(Boolean);
   const appUrl = process.env.APP_URL ? process.env.APP_URL.trim().replace(/\/+$/, '') : '';
   const allAllowed = [...DEFAULT_ALLOWED_ORIGINS, ...envOrigins, ...(appUrl ? [appUrl] : [])];
 
-  if (allAllowed.includes(origin)) return true;
-  if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return true;
-  if (/^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)) return true;
-  if (/^https?:\/\/192\.168\.\d+\.\d+(:\d+)?$/.test(origin)) return true;
-  if (/^https:\/\/[a-z0-9-]+\.asia-east1\.run\.app$/.test(origin) || /^https:\/\/[a-z0-9-]+\.run\.app$/.test(origin)) {
-    return true;
-  }
+  const normalizedOrigin = origin.trim().replace(/\/+$/, '');
+  if (allAllowed.includes(normalizedOrigin)) return true;
+  if (/^https?:\/\/localhost(:\d+)?$/.test(normalizedOrigin)) return true;
+  if (/^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(normalizedOrigin)) return true;
+  if (/^https?:\/\/192\.168\.\d+\.\d+(:\d+)?$/.test(normalizedOrigin)) return true;
   return false;
 }
 
@@ -48,11 +49,9 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   if (origin && isAllowedOrigin(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
-  } else if (!origin) {
-    res.setHeader('Access-Control-Allow-Origin', 'https://localhost');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, X-Surya-Client-Id');
 
   if (req.method === 'OPTIONS') {
     if (origin && !isAllowedOrigin(origin)) {
@@ -106,13 +105,45 @@ function rateLimiter(maxRequests: number, windowSeconds: number) {
   };
 }
 
-// Global API rate limiter (180 req / minute)
-app.use('/api', rateLimiter(180, 60));
+// Global API rate limiter (default 180 req / minute)
+const GLOBAL_RATE_LIMIT = Number(process.env.SURYA_RATE_LIMIT_MAX) > 0 ? Number(process.env.SURYA_RATE_LIMIT_MAX) : 180;
+app.use('/api', rateLimiter(GLOBAL_RATE_LIMIT, 60));
 
 // Specific strict rate limits
 const chatLimiter = rateLimiter(60, 60); // 60 queries / min
 const visionLimiter = rateLimiter(20, 60); // 20 optical scans / min
 const veronicaLimiter = rateLimiter(30, 60); // 30 security auth / min
+
+// Optional Server Access Token Middleware (enforced whenever SURYA_API_TOKEN is configured)
+function requireApiAuth(req: Request, res: Response, next: NextFunction) {
+  const configuredToken = getConfiguredApiToken();
+  if (!configuredToken) {
+    return next();
+  }
+
+  const authHeader = req.headers.authorization;
+  const bearer = typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
+    ? authHeader.slice(7).trim()
+    : '';
+
+  if (!bearer) {
+    return res.status(401).json({
+      error: 'Authentication required. Configure your SURYA Access Token in System Settings.',
+      code: 'AUTHENTICATION_REQUIRED',
+    });
+  }
+
+  const expectedBuf = Buffer.from(configuredToken, 'utf-8');
+  const providedBuf = Buffer.from(bearer, 'utf-8');
+  if (expectedBuf.length !== providedBuf.length || !crypto.timingSafeEqual(expectedBuf, providedBuf)) {
+    return res.status(403).json({
+      error: 'Access denied. Invalid SURYA Access Token.',
+      code: 'INVALID_CREDENTIALS',
+    });
+  }
+
+  next();
+}
 
 // Persistent Data Storage Paths
 const DATA_DIR = path.resolve(__dirname, 'data');
@@ -120,6 +151,7 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 const MEMORY_FILE = path.join(DATA_DIR, 'world_model.json');
+const USER_MEMORIES_FILE = path.join(DATA_DIR, 'world_model_users.json');
 const AUDIT_FILE = path.join(DATA_DIR, 'veronica_audit.json');
 const PLUGINS_FILE = path.join(DATA_DIR, 'plugins.json');
 const SKILLS_FILE = path.join(DATA_DIR, 'custom_skills.json');
@@ -147,9 +179,9 @@ const AVAILABLE_AI_MODELS: AIModelMeta[] = [
     isDefault: true,
   },
   {
-    id: 'gemini-3.8-flash',
-    name: 'Gemini 3.8 Flash',
-    description: 'Ultra-fast multimodal model tuned for real-time mobile assistant interactions',
+    id: 'gemini-4-carbon',
+    name: 'Gemini 4 Carbon',
+    description: 'Balanced high-speed multimodal model tuned for real-time mobile assistant interactions',
     speed: 'Ultra-Fast',
     latencyRating: 5,
   },
@@ -185,20 +217,90 @@ function getGeminiClient(): GoogleGenAI | null {
   });
 }
 
-async function generateWithFallback(
+const PRIMARY_UPSTREAM_TIMEOUT_MS = 12000;
+
+function withUpstreamTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const err: any = new Error(`${label} timed out after ${ms}ms`);
+      err.status = 504;
+      err.isTimeout = true;
+      reject(err);
+    }, ms);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
+function shouldFallbackToLite(err: any): boolean {
+  return (
+    err?.isTimeout === true ||
+    err?.status === 429 ||
+    err?.status === 503 ||
+    err?.status === 504 ||
+    Boolean(
+      err?.message &&
+        (err.message.includes('429') ||
+          err.message.includes('503') ||
+          err.message.includes('504') ||
+          err.message.includes('timed out') ||
+          err.message.includes('UNAVAILABLE') ||
+          err.message.includes('ResourceExhausted'))
+    )
+  );
+}
+
+export async function generateWithFallback(
   ai: GoogleGenAI,
   params: { model: string; contents: any; config?: any },
   fallbackModel = 'gemini-3.1-flash-lite'
 ) {
   try {
+    if (params.model !== fallbackModel) {
+      return await withUpstreamTimeout(
+        ai.models.generateContent(params),
+        PRIMARY_UPSTREAM_TIMEOUT_MS,
+        `Model ${params.model}`
+      );
+    }
     return await ai.models.generateContent(params);
   } catch (err: any) {
-    const isOverloaded =
-      err?.status === 429 ||
-      err?.status === 503 ||
-      (err?.message && (err.message.includes('429') || err.message.includes('503') || err.message.includes('UNAVAILABLE')));
-    if (isOverloaded && params.model !== fallbackModel) {
+    if (shouldFallbackToLite(err) && params.model !== fallbackModel) {
+      console.warn(`[SURYA Gemini] Fallback from ${params.model} to ${fallbackModel}: ${err?.message || err}`);
       return await ai.models.generateContent({ ...params, model: fallbackModel });
+    }
+    throw err;
+  }
+}
+
+async function generateWithFallbackMeta(
+  ai: GoogleGenAI,
+  params: { model: string; contents: any; config?: any },
+  fallbackModel = 'gemini-3.1-flash-lite'
+): Promise<{ response: any; modelUsed: string; fellBack: boolean }> {
+  try {
+    const response =
+      params.model !== fallbackModel
+        ? await withUpstreamTimeout(
+            ai.models.generateContent(params),
+            PRIMARY_UPSTREAM_TIMEOUT_MS,
+            `Model ${params.model}`
+          )
+        : await ai.models.generateContent(params);
+    return { response, modelUsed: params.model, fellBack: false };
+  } catch (err: any) {
+    if (shouldFallbackToLite(err) && params.model !== fallbackModel) {
+      console.warn(`[SURYA Gemini] Fallback from ${params.model} to ${fallbackModel}: ${err?.message || err}`);
+      const response = await ai.models.generateContent({ ...params, model: fallbackModel });
+      return { response, modelUsed: fallbackModel, fellBack: true };
     }
     throw err;
   }
@@ -301,6 +403,44 @@ function persistWorldModel() {
   } catch (err) {
     console.error('[WorldModel] Persistence write failed:', err);
   }
+}
+
+// Per-User Isolated World Model Store (keyed by salted client/auth namespace hash)
+let userMemoryStores: Record<string, MemoryRecord[]> = {};
+try {
+  if (fs.existsSync(USER_MEMORIES_FILE)) {
+    userMemoryStores = JSON.parse(fs.readFileSync(USER_MEMORIES_FILE, 'utf-8'));
+  }
+} catch (e) {
+  console.warn('[WorldModel] Failed to read per-user memory file:', e);
+}
+
+function persistUserMemoryStores() {
+  try {
+    fs.writeFileSync(USER_MEMORIES_FILE, JSON.stringify(userMemoryStores, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('[WorldModel] Per-user persistence write failed:', err);
+  }
+}
+
+export function getUserNamespace(req: Request): string {
+  const clientHeader = req.headers['x-surya-client-id'];
+  const authHeader = req.headers.authorization;
+  const rawIdentity =
+    typeof clientHeader === 'string' && clientHeader.trim()
+      ? `client:${clientHeader.trim()}`
+      : typeof authHeader === 'string' && authHeader.trim()
+      ? `auth:${authHeader.trim()}`
+      : 'default_local';
+  return crypto.createHash('sha256').update(rawIdentity).digest('hex').slice(0, 24);
+}
+
+function getMemoriesForUser(namespace: string): MemoryRecord[] {
+  if (!userMemoryStores[namespace]) {
+    userMemoryStores[namespace] = personalWorldModel.map((m) => ({ ...m }));
+    persistUserMemoryStores();
+  }
+  return userMemoryStores[namespace];
 }
 
 // Initial Audit Logs State
@@ -493,11 +633,17 @@ const SCIENTIFIC_DATABASE = [
 
 /* ---------------- API ROUTES ---------------- */
 
+// Apply optional API authentication to sensitive routes (GET /api/health remains public)
+app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+  if (req.path === '/health') return next();
+  return requireApiAuth(req, res, next);
+});
+
 // 1. Available Models Registry
 app.get('/api/models', (req: Request, res: Response) => {
   return res.json({
     models: AVAILABLE_AI_MODELS,
-    defaultModel: 'gemini-3.8-flash',
+    defaultModel: 'gemini-4-hydrogen',
     fallbackModel: 'gemini-3.1-flash-lite',
     timestamp: new Date().toISOString(),
   });
@@ -510,7 +656,8 @@ app.get('/api/config/api-key', (req: Request, res: Response) => {
     return res.json({
       configured: false,
       maskedKey: null,
-      model: 'gemini-3.8-flash',
+      model: 'gemini-4-hydrogen',
+      fallbackModel: 'gemini-3.1-flash-lite',
       status: 'Awaiting API Key in Settings > Secrets',
     });
   }
@@ -519,7 +666,8 @@ app.get('/api/config/api-key', (req: Request, res: Response) => {
   return res.json({
     configured: true,
     maskedKey,
-    model: 'gemini-3.8-flash',
+    model: 'gemini-4-hydrogen',
+    fallbackModel: 'gemini-3.1-flash-lite',
     status: 'ACTIVE_ONLINE',
   });
 });
@@ -527,29 +675,41 @@ app.get('/api/config/api-key', (req: Request, res: Response) => {
 app.post('/api/config/api-key/verify', async (req: Request, res: Response) => {
   const ai = getGeminiClient();
   if (!ai) {
-    return res.status(400).json({
+    return res.status(503).json({
       success: false,
-      error: 'GEMINI_API_KEY environment variable is not configured.',
+      error: 'GEMINI_API_KEY environment variable is not configured on the server.',
     });
   }
 
   try {
     const startTime = Date.now();
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: 'Ping. Confirm SURYA mobile assistant connection in 5 words.',
+    const { response, modelUsed, fellBack } = await generateWithFallbackMeta(ai, {
+      model: 'gemini-4-hydrogen',
+      contents: 'Reply concisely in under 8 words confirming you are active for SURYA gateway verification.',
+      config: {
+        systemInstruction: 'You are SURYA backend health verification. Reply briefly confirming status.',
+      },
     });
     const latencyMs = Date.now() - startTime;
+    const text = (response.text || '').trim();
+    if (!text) {
+      return res.status(502).json({
+        success: false,
+        error: 'Upstream Gemini returned an empty verification response.',
+      });
+    }
     return res.json({
       success: true,
-      model: 'gemini-3.8-flash',
+      model: modelUsed,
+      fallbackUsed: fellBack,
       latencyMs,
-      response: sanitizeContent(response.text ?? 'SURYA solar systems operational and online.'),
+      response: sanitizeContent(text),
     });
   } catch (error: any) {
-    return res.status(500).json({
+    const status = error?.status === 429 ? 429 : error?.status === 503 ? 503 : 502;
+    return res.status(status).json({
       success: false,
-      error: error?.message || 'Failed to verify Gemini API connection.',
+      error: sanitizeContent(error?.message || 'Failed to verify Gemini API connection upstream.'),
     });
   }
 });
@@ -700,17 +860,29 @@ app.post('/api/chat/stream', chatLimiter, async (req: Request, res: Response) =>
   // Function to stream from a given model
   const streamFromModel = async (targetModel: string): Promise<boolean> => {
     try {
-      const streamResponse = await ai.models.generateContentStream({
+      const streamInitPromise = ai.models.generateContentStream({
         model: targetModel,
         contents,
         config: {
           systemInstruction,
         },
       });
+      const streamResponse =
+        targetModel !== 'gemini-3.1-flash-lite'
+          ? await withUpstreamTimeout(streamInitPromise, PRIMARY_UPSTREAM_TIMEOUT_MS, `Stream ${targetModel}`)
+          : await streamInitPromise;
 
-      for await (const chunk of streamResponse) {
+      const iterator = streamResponse[Symbol.asyncIterator]();
+      while (true) {
         if (clientDisconnected) break;
-        const text = chunk.text || '';
+        const nextPromise = iterator.next();
+        const step =
+          firstTokenTime === null && targetModel !== 'gemini-3.1-flash-lite'
+            ? await withUpstreamTimeout(nextPromise, PRIMARY_UPSTREAM_TIMEOUT_MS, `First chunk ${targetModel}`)
+            : await nextPromise;
+        if (step.done) break;
+        const chunk = step.value;
+        const text = chunk?.text || '';
         if (text) {
           if (firstTokenTime === null) {
             firstTokenTime = Date.now() - startTime;
@@ -735,19 +907,15 @@ app.post('/api/chat/stream', chatLimiter, async (req: Request, res: Response) =>
       return true;
     } catch (err: any) {
       console.warn(`[SURYA Stream] Error on model ${targetModel}:`, err?.message || err);
-      // Check if error is overload/rate limit (429 or 503)
-      const isOverloaded =
-        err?.status === 429 ||
-        err?.status === 503 ||
-        (err?.message && (err.message.includes('429') || err.message.includes('503') || err.message.includes('ResourceExhausted') || err.message.includes('overloaded')));
+      const canFallback = shouldFallbackToLite(err) && autoFallback && targetModel !== 'gemini-3.1-flash-lite';
 
-      if (isOverloaded && autoFallback && targetModel !== 'gemini-3.1-flash-lite') {
+      if (canFallback) {
         const fallbackTarget = 'gemini-3.1-flash-lite';
         sendSSE({
           type: 'fallback',
           originalModel: targetModel,
           fallbackModel: fallbackTarget,
-          reason: 'Primary model experiencing high demand. Seamlessly routing to ultra-fast Flash Lite.',
+          reason: 'Primary model delayed or overloaded. Seamlessly routing to Flash Lite.',
         });
         activeModel = fallbackTarget;
         return await streamFromModel(fallbackTarget);
@@ -830,44 +998,44 @@ app.post('/api/chat', chatLimiter, async (req: Request, res: Response) => {
     let activeModel = model;
     let responseText = '';
 
-    try {
+    if (autoFallback && activeModel !== 'gemini-3.1-flash-lite') {
+      const meta = await generateWithFallbackMeta(
+        ai,
+        {
+          model: activeModel,
+          contents,
+          config: { systemInstruction },
+        },
+        'gemini-3.1-flash-lite'
+      );
+      activeModel = meta.modelUsed;
+      responseText = meta.response?.text || '';
+    } else {
       const response = await ai.models.generateContent({
         model: activeModel,
         contents,
         config: { systemInstruction },
       });
       responseText = response.text || '';
-    } catch (modelErr: any) {
-      const isOverloaded =
-        modelErr?.status === 429 ||
-        modelErr?.status === 503 ||
-        (modelErr?.message && (modelErr.message.includes('429') || modelErr.message.includes('503')));
-
-      if (isOverloaded && autoFallback && activeModel !== 'gemini-3.1-flash-lite') {
-        activeModel = 'gemini-3.1-flash-lite';
-        const fallbackRes = await ai.models.generateContent({
-          model: activeModel,
-          contents,
-          config: { systemInstruction },
-        });
-        responseText = fallbackRes.text || '';
-      } else {
-        throw modelErr;
-      }
     }
 
     const latencyMs = Date.now() - startTime;
+    if (!responseText.trim()) {
+      return res.status(502).json({
+        error: 'Upstream Gemini model returned an empty response.',
+      });
+    }
 
     return res.json({
-      text: sanitizeContent(responseText || 'SURYA solar response complete.'),
+      text: sanitizeContent(responseText),
       model: activeModel,
       latencyMs,
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
-    console.error('Gemini chat error:', error);
-    return res.status(500).json({
-      error: error?.message || 'Error processing AI chat response.',
+    const status = error?.status === 429 ? 429 : error?.status === 503 ? 503 : 502;
+    return res.status(status).json({
+      error: sanitizeContent(error?.message || 'Error processing AI chat response upstream.'),
     });
   }
 });
@@ -892,8 +1060,8 @@ app.post('/api/vision', visionLimiter, async (req: Request, res: Response) => {
   try {
     const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+    const { response, modelUsed } = await generateWithFallbackMeta(ai, {
+      model: 'gemini-4-hydrogen',
       contents: {
         parts: [
           {
@@ -916,14 +1084,20 @@ Strictly ensure all telemetry remains peaceful, analytical, non-operational, and
       },
     });
 
+    const telemetry = (response.text || '').trim();
+    if (!telemetry) {
+      return res.status(502).json({ error: 'Upstream vision model returned empty optical telemetry.' });
+    }
+
     return res.json({
-      telemetry: sanitizeContent(response.text || 'Optical analysis complete. Target field acquired.'),
+      telemetry: sanitizeContent(telemetry),
+      model: modelUsed,
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
-    console.error('Vision analysis error:', error);
-    return res.status(500).json({
-      error: error?.message || 'Failed to process optical image analysis.',
+    const status = error?.status === 429 ? 429 : error?.status === 503 ? 503 : 502;
+    return res.status(status).json({
+      error: sanitizeContent(error?.message || 'Failed to process optical image analysis.'),
     });
   }
 });
@@ -1098,15 +1272,19 @@ app.post('/api/apps/launch', (req: Request, res: Response) => {
   });
 });
 
-// 8. Personal World Model Memory Store
+// 8. Personal World Model Memory Store (Strict Per-User Namespace Isolation)
 app.get('/api/memory', (req: Request, res: Response) => {
+  const ns = getUserNamespace(req);
+  const memories = getMemoriesForUser(ns);
   return res.json({
-    memories: personalWorldModel,
-    count: personalWorldModel.length,
+    memories,
+    count: memories.length,
   });
 });
 
 app.post('/api/memory', (req: Request, res: Response) => {
+  const ns = getUserNamespace(req);
+  const memories = getMemoriesForUser(ns);
   const { category = 'fact', key, value } = req.body;
   if (!key || !value || typeof key !== 'string' || typeof value !== 'string') {
     return res.status(400).json({ error: 'Memory key and value are required.' });
@@ -1121,16 +1299,16 @@ app.post('/api/memory', (req: Request, res: Response) => {
   const cleanKey = sanitizeContent(key.slice(0, 100));
   const cleanValue = sanitizeContent(value.slice(0, 500));
 
-  const existingIdx = personalWorldModel.findIndex((m) => m.key.toLowerCase() === cleanKey.toLowerCase());
+  const existingIdx = memories.findIndex((m) => m.key.toLowerCase() === cleanKey.toLowerCase());
   if (existingIdx >= 0) {
-    personalWorldModel[existingIdx] = {
-      ...personalWorldModel[existingIdx],
+    memories[existingIdx] = {
+      ...memories[existingIdx],
       value: cleanValue,
       confidence: 0.99,
       updatedAt: new Date().toISOString(),
     };
-    persistWorldModel();
-    return res.json({ success: true, updated: personalWorldModel[existingIdx] });
+    persistUserMemoryStores();
+    return res.json({ success: true, updated: memories[existingIdx] });
   }
 
   const newRecord: MemoryRecord = {
@@ -1141,26 +1319,30 @@ app.post('/api/memory', (req: Request, res: Response) => {
     confidence: 0.95,
     updatedAt: new Date().toISOString(),
   };
-  personalWorldModel.push(newRecord);
-  persistWorldModel();
+  memories.push(newRecord);
+  persistUserMemoryStores();
   return res.json({ success: true, created: newRecord });
 });
 
 app.delete('/api/memory/:id', (req: Request, res: Response) => {
+  const ns = getUserNamespace(req);
+  const memories = getMemoriesForUser(ns);
   const { id } = req.params;
-  const initialLength = personalWorldModel.length;
-  personalWorldModel = personalWorldModel.filter((m) => m.id !== id);
-  if (personalWorldModel.length === initialLength) {
+  const initialLength = memories.length;
+  const filtered = memories.filter((m) => m.id !== id);
+  if (filtered.length === initialLength) {
     return res.status(404).json({ error: 'Memory entry not found.' });
   }
-  persistWorldModel();
-  return res.json({ success: true, remaining: personalWorldModel.length });
+  userMemoryStores[ns] = filtered;
+  persistUserMemoryStores();
+  return res.json({ success: true, remaining: filtered.length });
 });
 
 app.post('/api/memory/clear', (req: Request, res: Response) => {
-  personalWorldModel = [];
-  persistWorldModel();
-  return res.json({ success: true, message: 'Personal World Model memory wiped.' });
+  const ns = getUserNamespace(req);
+  userMemoryStores[ns] = [];
+  persistUserMemoryStores();
+  return res.json({ success: true, message: 'Personal World Model memory wiped for current operator.' });
 });
 
 // 9. Audit Logs
@@ -1183,7 +1365,9 @@ app.get('/api/health', (req: Request, res: Response) => {
     targetPlatform: 'Android SDK 36 (Java 21 / Gradle 8.11.1)',
     uptimeSeconds: Math.floor(process.uptime()),
     geminiConfigured: Boolean(apiKey),
+    authRequired: Boolean(getConfiguredApiToken()),
     activeModel: 'gemini-4-hydrogen',
+    fallbackModel: 'gemini-3.1-flash-lite',
     memoryRssMb: Math.round(memUsage.rss / (1024 * 1024)),
     worldModelEntries: personalWorldModel.length,
     auditLogsCount: veronicaAuditLogs.length,
@@ -1283,8 +1467,8 @@ Do NOT claim autonomous code execution.`;
   }
 
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+    const { response } = await generateWithFallbackMeta(ai, {
+      model: 'gemini-4-hydrogen',
       contents: prompt,
     });
     return res.json({
@@ -1292,7 +1476,7 @@ Do NOT claim autonomous code execution.`;
       timestamp: new Date().toISOString(),
     });
   } catch (err: any) {
-    return res.status(500).json({ error: 'Self-improvement analysis error: ' + (err.message || 'Unknown') });
+    return res.status(502).json({ error: 'Self-improvement analysis error: ' + sanitizeContent(err?.message || 'Upstream unavailable') });
   }
 });
 
@@ -1344,8 +1528,8 @@ Analyze this image frame and output a strictly valid JSON object matching this s
 }
 Ensure all box coordinates are percentages (0 to 100). Keep all analysis strictly peaceful, safe, educational, and non-weaponized.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+    const { response } = await generateWithFallbackMeta(ai, {
+      model: 'gemini-4-hydrogen',
       contents: {
         parts: [
           {
@@ -1369,27 +1553,10 @@ Ensure all box coordinates are percentages (0 to 100). Keep all analysis strictl
       timestamp: new Date().toISOString(),
     });
   } catch (err: any) {
-    console.error('SURYA Vision error:', err);
-    return res.json({
-      success: true,
-      analysis: {
-        summary: 'Visual target field scanned and analyzed.',
-        entities: [
-          {
-            id: 'e_fallback',
-            label: 'Detected Primary Subject',
-            category: 'Object',
-            description: 'Optical inspection complete. Scene elements mapped.',
-            confidence: 0.92,
-            estimatedDistance: '1.5m (Visual Estimate)',
-            box: { ymin: 25, xmin: 25, ymax: 75, xmax: 75 },
-          },
-        ],
-        ocrText: '',
-        ocrTranslation: '',
-        hudAdvisory: 'Standard Optics HUD online. Benign telemetry confirmed.',
-      },
-      timestamp: new Date().toISOString(),
+    const status = err?.status === 429 ? 429 : err?.status === 503 ? 503 : 502;
+    return res.status(status).json({
+      success: false,
+      error: sanitizeContent(err?.message || 'Optical vision analysis failed upstream.'),
     });
   }
 });
@@ -1425,17 +1592,23 @@ app.post('/api/vision/chat', visionLimiter, async (req: Request, res: Response) 
 Answer clearly, concisely, and knowledgeably, directly referencing what is visible in the scene. Explain machines, text, plants, landmarks, or electronic components as requested.`,
     });
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+    const { response } = await generateWithFallbackMeta(ai, {
+      model: 'gemini-4-hydrogen',
       contents: { parts },
     });
 
+    const answer = (response.text || '').trim();
+    if (!answer) {
+      return res.status(502).json({ error: 'Upstream vision chat returned empty output.' });
+    }
+
     return res.json({
-      answer: sanitizeContent(response.text || 'Visual target analyzed.'),
+      answer: sanitizeContent(answer),
       timestamp: new Date().toISOString(),
     });
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Failed to answer visual question.' });
+    const status = err?.status === 429 ? 429 : err?.status === 503 ? 503 : 502;
+    return res.status(status).json({ error: sanitizeContent(err?.message || 'Failed to answer visual question.') });
   }
 });
 
@@ -1843,60 +2016,37 @@ app.post('/api/apps/generate', async (req: Request, res: Response) => {
   }
 
   const ai = getGeminiClient();
+  if (!ai) {
+    return res.status(503).json({ error: 'Gemini AI service unavailable for Studio generation.' });
+  }
+
   const appId = `app_${Date.now()}`;
-
   let previewHtml = '';
-  let generatedFiles: { path: string; content: string; language: string }[] = [];
 
-  if (ai) {
-    try {
-      const codePrompt = `You are SURYA App Creator. The user wants to build an application: "${prompt}".
+  try {
+    const codePrompt = `You are SURYA App Creator. The user wants to build an application: "${sanitizeContent(prompt)}".
 Generate a complete, fully functional, beautiful single-page web app with Tailwind CSS.
 Include interactive elements, working javascript state, buttons, forms, and responsive mobile-first UI.
 Return ONLY valid HTML inside an <html> document with embedded <script> and Tailwind CDN.`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: codePrompt,
-      });
+    const { response } = await generateWithFallbackMeta(ai, {
+      model: 'gemini-4-hydrogen',
+      contents: codePrompt,
+    });
 
-      let rawCode = response.text || '';
-      // Strip markdown code fences
-      rawCode = rawCode.replace(/^```html\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
-      previewHtml = rawCode;
-    } catch (e) {
-      console.warn('AI generation fallback to template:', e);
-    }
+    let rawCode = response.text || '';
+    rawCode = rawCode.replace(/^```html\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
+    previewHtml = rawCode;
+  } catch (err: any) {
+    const status = err?.status === 429 ? 429 : err?.status === 503 ? 503 : 502;
+    return res.status(status).json({ error: sanitizeContent(err?.message || 'Studio generation failed upstream.') });
   }
 
-  // Fallback high-quality template if offline or needed
-  if (!previewHtml) {
-    previewHtml = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>${appName}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-[#070b14] text-slate-100 min-h-screen p-4 font-sans">
-  <header class="p-3 bg-slate-900 border border-amber-500/40 rounded-xl mb-4 flex items-center justify-between">
-    <h1 class="text-sm font-bold text-amber-400 font-mono uppercase">${appName}</h1>
-    <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-300">SURYA APP</span>
-  </header>
-  <div class="space-y-3">
-    <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800">
-      <h2 class="text-xs font-semibold text-slate-200 mb-1">Interactive Application Workspace</h2>
-      <p class="text-[11px] text-slate-400 mb-3">${prompt}</p>
-      <button onclick="alert('Feature activated in ${appName}')" class="w-full py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-lg uppercase">
-        Launch Action
-      </button>
-    </div>
-  </div>
-</body>
-</html>`;
+  if (!previewHtml || previewHtml.length < 40) {
+    return res.status(502).json({ error: 'Upstream AI model returned invalid or empty application HTML.' });
   }
 
-  generatedFiles = [
+  const generatedFiles = [
     { path: 'index.html', language: 'html', content: previewHtml },
     { path: 'app.config.json', language: 'json', content: JSON.stringify({ name: appName, category, version: '1.0.0' }, null, 2) },
   ];
@@ -1923,40 +2073,47 @@ Return ONLY valid HTML inside an <html> document with embedded <script> and Tail
 
 app.post('/api/apps/:id/modify', async (req: Request, res: Response) => {
   const { prompt } = req.body;
-  const app = generatedAppsCatalog.find((a) => a.id === req.params.id);
-  if (!app) return res.status(404).json({ error: 'App not found' });
+  const appRecord = generatedAppsCatalog.find((a) => a.id === req.params.id);
+  if (!appRecord) return res.status(404).json({ error: 'App not found' });
+  if (!prompt || typeof prompt !== 'string') {
+    return res.status(400).json({ error: 'Modification prompt is required.' });
+  }
 
   const ai = getGeminiClient();
-  if (ai && prompt) {
-    try {
-      const editPrompt = `You are SURYA App Creator. The current HTML code of the app is:
-${app.previewHtml.slice(0, 6000)}
+  if (!ai) {
+    return res.status(503).json({ error: 'Gemini AI service unavailable for Studio modification.' });
+  }
+
+  try {
+    const editPrompt = `You are SURYA App Creator. The current HTML code of the app is:
+${appRecord.previewHtml.slice(0, 6000)}
 
 The user asks to modify the app:
-"${prompt}"
+"${sanitizeContent(prompt)}"
 
 Return the UPDATED complete standalone HTML code. Return ONLY valid HTML with embedded script and styling.`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: editPrompt,
-      });
+    const { response } = await generateWithFallbackMeta(ai, {
+      model: 'gemini-4-hydrogen',
+      contents: editPrompt,
+    });
 
-      let updatedHtml = response.text || '';
-      updatedHtml = updatedHtml.replace(/^```html\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
-      if (updatedHtml.length > 50) {
-        app.previewHtml = updatedHtml;
-        const htmlFile = app.files.find((f) => f.path === 'index.html');
-        if (htmlFile) htmlFile.content = updatedHtml;
-      }
-    } catch (e) {
-      console.warn('Modify error:', e);
+    let updatedHtml = response.text || '';
+    updatedHtml = updatedHtml.replace(/^```html\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
+    if (updatedHtml.length <= 50) {
+      return res.status(502).json({ error: 'Upstream AI model returned insufficient modified HTML.' });
     }
+    appRecord.previewHtml = updatedHtml;
+    const htmlFile = appRecord.files.find((f) => f.path === 'index.html');
+    if (htmlFile) htmlFile.content = updatedHtml;
+  } catch (err: any) {
+    const status = err?.status === 429 ? 429 : err?.status === 503 ? 503 : 502;
+    return res.status(status).json({ error: sanitizeContent(err?.message || 'Studio modification failed upstream.') });
   }
 
-  app.lastModified = new Date().toISOString();
+  appRecord.lastModified = new Date().toISOString();
   persistApps();
-  return res.json({ success: true, app, message: 'Application updated with user modifications.' });
+  return res.json({ success: true, app: appRecord, message: 'Application updated with user modifications.' });
 });
 
 app.delete('/api/apps/:id', (req: Request, res: Response) => {
@@ -2132,6 +2289,8 @@ app.get('/api/security/report', (req: Request, res: Response) => {
   return res.json({
     serverCredentialsIsolated: true,
     geminiKeyConfigured: Boolean(process.env.GEMINI_API_KEY),
+    authTokenEnforced: Boolean(getConfiguredApiToken()),
+    perUserMemoryIsolation: true,
     corsPolicy: 'restricted_allowlist',
     rateLimitingActive: true,
     veronicaChallengeCount: veronicaChallenges.size,
@@ -2148,9 +2307,20 @@ app.all('/api/*', (req: Request, res: Response) => {
   res.status(404).json({ error: `API endpoint not found: ${req.method} ${req.path}` });
 });
 
+// JSON Error Middleware (Never expose internal stack traces)
+app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
+  if (err?.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+    return res.status(400).json({ error: 'Malformed JSON request body.' });
+  }
+  if (err?.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Request payload exceeds 10MB limit.' });
+  }
+  return res.status(500).json({ error: 'Internal server error.' });
+});
+
 // Vite middleware mounting in development
-async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
+export async function startServer() {
+  if (process.env.NODE_ENV !== 'production' && process.env.SURYA_SKIP_VITE !== '1') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -2171,12 +2341,16 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  return app.listen(PORT, '0.0.0.0', () => {
     console.log(`[SURYA Mobile] Server listening on http://0.0.0.0:${PORT}`);
   });
 }
 
-startServer().catch((err) => {
-  console.error('[SURYA Mobile] Server boot failed:', err);
-  process.exit(1);
-});
+if (process.env.SURYA_SKIP_LISTEN !== '1') {
+  startServer().catch((err) => {
+    console.error('[SURYA Mobile] Server boot failed:', err);
+    process.exit(1);
+  });
+}
+
+export { app };

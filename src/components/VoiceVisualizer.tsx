@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Mic, MicOff, Square, Volume2 } from 'lucide-react';
+import { Mic, Square, Radio } from 'lucide-react';
 import { voiceService } from '../services/voiceService';
+import { wakeWordService, WakeWordState } from '../services/wakeWordService';
 import { soundFx } from '../services/soundFx';
 
 interface VoiceVisualizerProps {
@@ -9,131 +10,119 @@ interface VoiceVisualizerProps {
 
 export const VoiceVisualizer: React.FC<VoiceVisualizerProps> = ({ onTranscriptCaptured }) => {
   const [voiceState, setVoiceState] = useState(voiceService.getState());
-  const [waveAmplitudes, setWaveAmplitudes] = useState<number[]>(new Array(18).fill(8));
+  const [wakeState, setWakeState] = useState<WakeWordState>(wakeWordService.getState());
+  const [waveAmplitudes, setWaveAmplitudes] = useState<number[]>(new Array(12).fill(6));
 
   useEffect(() => {
-    const unsubscribe = voiceService.subscribe((state) => {
-      setVoiceState(state);
-    });
-    return () => unsubscribe();
+    const unsubVoice = voiceService.subscribe(setVoiceState);
+    const unsubWake = wakeWordService.subscribe(setWakeState);
+    return () => {
+      unsubVoice();
+      unsubWake();
+    };
   }, []);
 
-  // Animate waveform bars when speaking or listening
   useEffect(() => {
     let interval: any = null;
     if (voiceState.isListening || voiceState.isSpeaking) {
       interval = setInterval(() => {
-        const factor = voiceState.isSpeaking ? 34 : 26;
-        const newAmps = Array.from({ length: 18 }, () => {
-          return 6 + Math.floor(Math.random() * factor);
-        });
-        setWaveAmplitudes(newAmps);
-      }, 70);
+        const factor = voiceState.isSpeaking ? 22 : 18;
+        setWaveAmplitudes(Array.from({ length: 12 }, () => 5 + Math.floor(Math.random() * factor)));
+      }, 90);
     } else {
-      setWaveAmplitudes(new Array(18).fill(6));
+      setWaveAmplitudes(new Array(12).fill(5));
     }
-
     return () => {
       if (interval) clearInterval(interval);
     };
   }, [voiceState.isListening, voiceState.isSpeaking]);
 
-  const toggleMic = () => {
+  const handleToggleTalk = () => {
     soundFx.playClick();
     if (voiceState.isListening) {
       voiceService.stopListening();
+    } else if (voiceState.isSpeaking) {
+      voiceService.interruptAndListen((transcript) => {
+        if (transcript) onTranscriptCaptured(transcript);
+      });
     } else {
       voiceService.startListening((transcript) => {
-        if (transcript) {
-          onTranscriptCaptured(transcript);
-        }
+        if (transcript) onTranscriptCaptured(transcript);
       });
     }
   };
 
-  const handleInterrupt = () => {
+  const handleStopSpeaking = () => {
     soundFx.playClick();
     voiceService.stopSpeaking();
   };
 
   return (
-    <div className="w-full max-w-md mx-auto px-4 py-3 flex flex-col items-center">
-      {/* Live Transcript / Status Toast */}
+    <div className="w-full max-w-md mx-auto px-4 flex flex-col items-center gap-3">
+      {/* Live interim transcript or error */}
       {voiceState.transcript && (
-        <div className="mb-2 w-full max-w-sm px-3 py-1.5 rounded-lg bg-cyan-950/40 border border-cyan-500/30 text-center animate-fade-in">
-          <p className="text-xs font-mono text-cyan-200 truncate">
-            &ldquo;{voiceState.transcript}&rdquo;
-          </p>
+        <div className="w-full px-3.5 py-2 rounded-xl bg-[#121826] border border-slate-800 text-center">
+          <p className="text-xs text-slate-200 truncate">&ldquo;{voiceState.transcript}&rdquo;</p>
         </div>
       )}
 
-      {/* Mic error message */}
       {voiceState.error && (
-        <div className="mb-2 px-3 py-1 rounded bg-rose-950/60 border border-rose-500/40 text-[11px] text-rose-300">
+        <div className="w-full px-3.5 py-2 rounded-xl bg-rose-950/50 border border-rose-500/30 text-xs text-rose-200 text-center">
           {voiceState.error}
         </div>
       )}
 
-      {/* Audio Waveform Display */}
-      <div className="flex items-center justify-center gap-1.5 h-12 w-full max-w-xs mb-3">
-        {waveAmplitudes.map((height, idx) => (
-          <div
-            key={idx}
-            className={`w-1 rounded-full transition-all duration-75 ${
-              voiceState.isSpeaking
-                ? 'bg-amber-400 shadow-amber-400/50'
-                : voiceState.isListening
-                ? 'bg-cyan-400 shadow-cyan-400/50'
-                : 'bg-slate-700/60'
-            }`}
-            style={{
-              height: `${height}px`,
-              boxShadow:
-                voiceState.isListening || voiceState.isSpeaking
-                  ? '0 0 6px currentColor'
-                  : 'none',
-            }}
-          />
-        ))}
-      </div>
+      {/* Subtle waveform only shown softly above control */}
+      {(voiceState.isListening || voiceState.isSpeaking) && (
+        <div className="flex items-center justify-center gap-1.5 h-8" aria-hidden="true">
+          {waveAmplitudes.map((height, idx) => (
+            <div
+              key={idx}
+              className={`w-1 rounded-full transition-all duration-100 ${
+                voiceState.isSpeaking ? 'bg-[#d4a84f]' : 'bg-[#60a5fa]'
+              }`}
+              style={{ height: `${height}px` }}
+            />
+          ))}
+        </div>
+      )}
 
-      {/* Touch Action Controls */}
-      <div className="flex items-center gap-4">
-        {/* Primary Voice Mic Button */}
+      {/* Primary Action Controls */}
+      <div className="flex items-center justify-center gap-2.5 flex-wrap">
         <button
-          onClick={toggleMic}
-          aria-label={voiceState.isListening ? 'Stop listening' : 'Start voice command'}
-          className={`relative min-h-[48px] min-w-[48px] px-5 py-2.5 rounded-full font-mono text-xs font-semibold flex items-center gap-2.5 transition-all duration-200 active:scale-95 ${
+          type="button"
+          onClick={handleToggleTalk}
+          aria-label={voiceState.isListening ? 'Stop listening' : 'Talk to SURYA'}
+          className={`min-h-[48px] px-6 py-2.5 rounded-full text-sm font-medium flex items-center gap-2.5 transition-all active:scale-95 ${
             voiceState.isListening
-              ? 'bg-cyan-500 text-slate-950 shadow-lg shadow-cyan-500/30 ring-2 ring-cyan-300'
-              : 'bg-slate-900 border border-cyan-500/40 text-cyan-400 hover:border-cyan-400/80 hover:bg-cyan-950/30'
+              ? 'bg-[#60a5fa] text-slate-950 shadow-md'
+              : 'bg-[#d4a84f] hover:bg-[#e0b65f] text-slate-950 shadow-sm'
           }`}
         >
-          {voiceState.isListening ? (
-            <>
-              <Mic className="w-4 h-4 animate-bounce" />
-              <span>LISTENING...</span>
-            </>
-          ) : (
-            <>
-              <Mic className="w-4 h-4" />
-              <span>VOICE COMMAND</span>
-            </>
-          )}
+          <Mic className="w-4 h-4" />
+          <span>{voiceState.isListening ? 'Listening... Tap to stop' : 'Talk to SURYA'}</span>
         </button>
 
-        {/* Interrupt Speech Button */}
         {voiceState.isSpeaking && (
           <button
-            onClick={handleInterrupt}
-            aria-label="Interrupt SURYA speech"
-            className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-full bg-amber-500/20 border border-amber-400 text-amber-300 flex items-center gap-1.5 text-xs font-mono font-medium hover:bg-amber-500/30 active:scale-95 transition-all"
+            type="button"
+            onClick={handleStopSpeaking}
+            aria-label="Stop speaking"
+            className="min-h-[48px] px-4 py-2.5 rounded-full bg-[#121826] border border-slate-700 hover:border-slate-500 text-slate-200 text-sm font-medium flex items-center gap-2 transition-colors active:scale-95"
           >
             <Square className="w-3.5 h-3.5 fill-current" />
-            <span>INTERRUPT</span>
+            <span>Stop</span>
           </button>
         )}
       </div>
+
+      {/* Visible hands-free mic indicator when enabled */}
+      {wakeState.isActive && (
+        <div className="flex items-center gap-1.5 text-xs text-emerald-300/90">
+          <Radio className="w-3.5 h-3.5" />
+          <span>Hands-free wake word active (&ldquo;Hey SURYA&rdquo;)</span>
+        </div>
+      )}
     </div>
   );
 };

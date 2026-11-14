@@ -1,0 +1,70 @@
+{
+  "3e9253cc16c16b0dd36a7c44": [
+    {
+      "id": "mem_1",
+      "category": "preference",
+      "key": "preferred_language",
+      "value": "Auto-detect (Indian & International languages supported)",
+      "confidence": 1,
+      "updatedAt": "2026-11-14T09:49:37.300Z"
+    },
+    {
+      "id": "mem_2",
+      "category": "preference",
+      "key": "response_mode",
+      "value": "Fast Mode with real-time SSE streaming",
+      "confidence": 0.98,
+      "updatedAt": "2026-11-14T09:49:37.301Z"
+    },
+    {
+      "id": "mem_3",
+      "category": "directive",
+      "key": "surya_security_protocol",
+      "value": "Enforce cryptographic challenge and 3-second abort countdown on medium/high-risk device actions",
+      "confidence": 1,
+      "updatedAt": "2026-11-14T09:49:37.301Z"
+    },
+    {
+      "id": "mem_4",
+      "category": "context",
+      "key": "target_platform",
+      "value": "SURYA Android Mobile Assistant (SDK 36, Capacitor 7, Java 21)",
+      "confidence": 0.95,
+      "updatedAt": "2026-11-14T09:49:37.301Z"
+    }
+  ],
+  "0ddb066c4523a5b8f7c1a8e4": [
+    {
+      "id": "mem_1",
+      "category": "preference",
+      "key": "preferred_language",
+      "value": "Auto-detect (Indian & International languages supported)",
+      "confidence": 1,
+      "updatedAt": "2026-11-14T09:49:37.300Z"
+    },
+    {
+      "id": "mem_2",
+      "category": "preference",
+      "key": "response_mode",
+      "value": "Fast Mode with real-time SSE streaming",
+      "confidence": 0.98,
+      "updatedAt": "2026-11-14T09:49:37.301Z"
+    },
+    {
+      "id": "mem_3",
+      "category": "directive",
+      "key": "surya_security_protocol",
+      "value": "Enforce cryptographic challenge and 3-second abort countdown on medium/high-risk device actions",
+      "confidence": 1,
+      "updatedAt": "2026-11-14T09:49:37.301Z"
+    },
+    {
+      "id": "mem_4",
+      "category": "context",
+      "key": "target_platform",
+      "value": "SURYA Android Mobile Assistant (SDK 36, Capacitor 7, Java 21)",
+      "confidence": 0.95,
+      "updatedAt": "2026-11-14T09:49:37.301Z"
+    }
+  ]
+}

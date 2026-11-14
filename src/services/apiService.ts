@@ -11,6 +11,34 @@ import {
   GithubRepoSummary,
   ResponseMode,
 } from '../types/surya';
+import {
+  STORAGE_KEY_BACKEND_URL,
+  STORAGE_KEY_API_TOKEN,
+  STORAGE_KEY_CLIENT_ID,
+  GatewayHttpError,
+  ConnectionState,
+  UrlValidationResult,
+  isAiStudioPreviewUrl,
+  normalizeBackendUrl,
+  joinApiUrl,
+  validateBackendUrl,
+  detectNativePlatform,
+  resolveApiBaseUrl,
+  looksLikeHtmlPayload,
+  classifyResponseFailure,
+  classifyNetworkException,
+} from './gatewayHelpers.js';
+
+export type { ConnectionState, UrlValidationResult };
+export {
+  GatewayHttpError,
+  isAiStudioPreviewUrl,
+  normalizeBackendUrl,
+  joinApiUrl,
+  validateBackendUrl,
+  detectNativePlatform,
+  resolveApiBaseUrl,
+};
 
 export interface VeronicaChallengeResponse {
   challengeId: string;
@@ -36,94 +64,488 @@ export interface ClientChatContext {
   preferredLanguage?: string;
   userMemories?: { key: string; value: string; category?: string }[];
   deviceContext?: Record<string, any>;
+  signal?: AbortSignal;
 }
 
-/**
- * Returns the effective backend base URL for API requests.
- */
-export function getApiBaseUrl(): string {
+export interface ConnectionStatusSnapshot {
+  state: ConnectionState;
+  effectiveUrl: string;
+  isConfigured: boolean;
+  isNative: boolean;
+  isPreviewUrl: boolean;
+  lastCheckedAt: string | null;
+  lastSuccessAt: string | null;
+  lastHttpStatus: number | null;
+  lastError: string | null;
+  serverModel: string | null;
+  authRequired: boolean;
+  geminiConfigured: boolean | null;
+}
+
+const DEFAULT_TIMEOUT_MS = 25000;
+const STREAM_TIMEOUT_MS = 65000;
+const HEALTH_TIMEOUT_MS = 10000;
+
+function readStorage(key: string): string {
   if (typeof window !== 'undefined' && window.localStorage) {
-    const custom = window.localStorage.getItem('surya_backend_url');
-    if (custom && custom.trim()) {
-      return custom.trim().replace(/\/+$/, '');
+    try {
+      return window.localStorage.getItem(key) || '';
+    } catch {
+      return '';
     }
   }
-
-  const envUrl = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_APP_URL;
-  if (envUrl && typeof envUrl === 'string' && envUrl.trim()) {
-    return envUrl.trim().replace(/\/+$/, '');
-  }
-
-  const isCapacitorNative =
-    typeof window !== 'undefined' &&
-    ((window as any).Capacitor?.isNativePlatform?.() ||
-      window.location.protocol === 'capacitor:' ||
-      window.location.protocol === 'file:' ||
-      (window.location.hostname === 'localhost' && (!window.location.port || window.location.port === '80')));
-
-  if (isCapacitorNative) {
-    return 'https://ais-dev-spa3isctk6gboolsd6lpzr-833118415389.asia-east1.run.app';
-  }
-
   return '';
 }
 
-export function setApiBaseUrl(url: string): void {
+function writeStorage(key: string, value: string): void {
   if (typeof window !== 'undefined' && window.localStorage) {
-    if (url && url.trim()) {
-      window.localStorage.setItem('surya_backend_url', url.trim().replace(/\/+$/, ''));
-    } else {
-      window.localStorage.removeItem('surya_backend_url');
+    try {
+      if (value && value.trim()) {
+        window.localStorage.setItem(key, value.trim());
+      } else {
+        window.localStorage.removeItem(key);
+      }
+    } catch {
+      // Ignore storage quota errors in restricted webviews
     }
   }
 }
 
-async function requestJson<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const baseUrl = getApiBaseUrl();
-  const url = `${baseUrl}${endpoint}`;
-
-  const headers = new Headers(options.headers || {});
-  if (!headers.has('Accept')) {
-    headers.set('Accept', 'application/json');
+export function getOrCreateClientId(): string {
+  const existing = readStorage(STORAGE_KEY_CLIENT_ID);
+  if (existing && /^[a-zA-Z0-9._:-]{8,80}$/.test(existing)) {
+    return existing;
   }
-  if (options.body && typeof options.body === 'string' && !headers.has('Content-Type')) {
+  let generated = `surya_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    generated = `surya_${crypto.randomUUID()}`;
+  }
+  writeStorage(STORAGE_KEY_CLIENT_ID, generated);
+  return generated;
+}
+
+export function getEnvBackendUrl(): string {
+  try {
+    const envUrl = import.meta?.env?.VITE_API_BASE_URL || '';
+    return typeof envUrl === 'string' ? normalizeBackendUrl(envUrl) : '';
+  } catch {
+    return '';
+  }
+}
+
+export function getApiBaseUrl(): string {
+  const stored = readStorage(STORAGE_KEY_BACKEND_URL);
+  const envUrl = getEnvBackendUrl();
+  const isNative = detectNativePlatform(typeof window !== 'undefined' ? window : undefined);
+  return resolveApiBaseUrl({ storedUrl: stored, envUrl, isNativePlatform: isNative });
+}
+
+export function isBackendConfigured(): boolean {
+  const isNative = detectNativePlatform(typeof window !== 'undefined' ? window : undefined);
+  const effective = getApiBaseUrl();
+  if (!isNative) return true; // Browser / web build uses explicit baseUrl or relative /api proxy
+  return Boolean(effective);
+}
+
+export function getApiToken(): string {
+  const stored = readStorage(STORAGE_KEY_API_TOKEN);
+  if (stored) return stored;
+  try {
+    const envToken = import.meta?.env?.VITE_SURYA_API_TOKEN;
+    return typeof envToken === 'string' ? envToken.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+export function getMaskedApiToken(): string {
+  const tok = getApiToken();
+  if (!tok) return '';
+  if (tok.length <= 8) return '****';
+  return `${tok.slice(0, 3)}••••${tok.slice(-3)}`;
+}
+
+// Connection State Machine Store
+const listeners = new Set<(snapshot: ConnectionStatusSnapshot) => void>();
+
+function buildInitialSnapshot(): ConnectionStatusSnapshot {
+  const isNative = detectNativePlatform(typeof window !== 'undefined' ? window : undefined);
+  const effectiveUrl = getApiBaseUrl();
+  const configured = isNative ? Boolean(effectiveUrl) : true;
+  const preview = isAiStudioPreviewUrl(effectiveUrl);
+
+  let initialError: string | null = null;
+  if (!configured) {
+    initialError =
+      'No SURYA backend URL configured. Deploy server.ts to Cloud Run or enter your backend URL in System Settings.';
+  } else if (preview) {
+    initialError =
+      'Configured URL points to an AI Studio preview host that enforces browser cookie checks and blocks mobile APKs.';
+  }
+
+  return {
+    state: 'DISCONNECTED',
+    effectiveUrl,
+    isConfigured: configured,
+    isNative,
+    isPreviewUrl: preview,
+    lastCheckedAt: null,
+    lastSuccessAt: null,
+    lastHttpStatus: null,
+    lastError: initialError,
+    serverModel: null,
+    authRequired: false,
+    geminiConfigured: null,
+  };
+}
+
+let connectionSnapshot: ConnectionStatusSnapshot = buildInitialSnapshot();
+
+function notifyListeners(): void {
+  const copy = { ...connectionSnapshot };
+  listeners.forEach((fn) => {
+    try {
+      fn(copy);
+    } catch {
+      // Ignore subscriber render errors
+    }
+  });
+}
+
+function updateSnapshot(patch: Partial<ConnectionStatusSnapshot>): void {
+  connectionSnapshot = {
+    ...connectionSnapshot,
+    ...patch,
+  };
+  notifyListeners();
+}
+
+export function getConnectionStatus(): ConnectionStatusSnapshot {
+  return { ...connectionSnapshot };
+}
+
+export function subscribeConnectionState(
+  listener: (snapshot: ConnectionStatusSnapshot) => void
+): () => void {
+  listeners.add(listener);
+  listener({ ...connectionSnapshot });
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+export function setApiBaseUrl(url: string): UrlValidationResult {
+  const isNative = detectNativePlatform(typeof window !== 'undefined' ? window : undefined);
+  const trimmed = typeof url === 'string' ? url.trim() : '';
+
+  if (!trimmed) {
+    writeStorage(STORAGE_KEY_BACKEND_URL, '');
+    const effectiveUrl = getApiBaseUrl();
+    const configured = isNative ? Boolean(effectiveUrl) : true;
+    const preview = isAiStudioPreviewUrl(effectiveUrl);
+    updateSnapshot({
+      state: 'DISCONNECTED',
+      effectiveUrl,
+      isConfigured: configured,
+      isPreviewUrl: preview,
+      lastHttpStatus: null,
+      lastError: configured
+        ? preview
+          ? 'Build-time backend URL points to an AI Studio preview host.'
+          : 'Custom gateway cleared — run Test Connection to verify backend.'
+        : 'Backend URL cleared. Android APK requires a deployed HTTPS SURYA backend URL.',
+    });
+    return {
+      valid: true,
+      normalized: effectiveUrl,
+      isPreviewUrl: preview,
+    };
+  }
+
+  const validation = validateBackendUrl(trimmed, { isNative });
+  if (!validation.valid) {
+    return validation;
+  }
+
+  writeStorage(STORAGE_KEY_BACKEND_URL, validation.normalized);
+  const effectiveUrl = getApiBaseUrl();
+  updateSnapshot({
+    // Saving alone must NOT mark CONNECTED; test/health check must succeed.
+    state: 'DISCONNECTED',
+    effectiveUrl,
+    isConfigured: isNative ? Boolean(effectiveUrl) : true,
+    isPreviewUrl: validation.isPreviewUrl,
+    lastHttpStatus: null,
+    lastError:
+      validation.warning || 'Gateway URL saved. Run Test Connection to verify reachability.',
+  });
+  return validation;
+}
+
+export function setApiToken(token: string): void {
+  writeStorage(STORAGE_KEY_API_TOKEN, token ? token.trim() : '');
+  updateSnapshot({
+    state: 'DISCONNECTED',
+    lastError: 'Access token updated. Run Test Connection to verify authorization.',
+  });
+}
+
+function buildRequestHeaders(extraHeaders?: HeadersInit, isJsonBody = false, accept = 'application/json'): Headers {
+  const headers = new Headers(extraHeaders || {});
+  if (!headers.has('Accept')) {
+    headers.set('Accept', accept);
+  }
+  if (isJsonBody && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
+  if (!headers.has('X-Surya-Client-Id')) {
+    headers.set('X-Surya-Client-Id', getOrCreateClientId());
+  }
+  const token = getApiToken();
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  return headers;
+}
 
-  let res: Response;
-  try {
-    res = await fetch(url, { ...options, headers });
-  } catch (netErr: any) {
-    throw new Error(
-      `Network connection failed to ${url}. Verify network access and backend host in System Settings: ${netErr.message || 'Unknown network error'}`
+function buildEndpointUrl(endpoint: string): { url: string; baseUrl: string } {
+  const isNative = detectNativePlatform(typeof window !== 'undefined' ? window : undefined);
+  const baseUrl = getApiBaseUrl();
+
+  if (isNative && !baseUrl) {
+    const err = new GatewayHttpError(
+      'SURYA backend URL is not configured for this Android APK. Open System > Health > Backend Server Gateway and enter your deployed HTTPS backend URL.',
+      {
+        code: 'UNCONFIGURED',
+        status: null,
+        connectionState: 'DISCONNECTED',
+        retryable: false,
+        url: endpoint,
+      }
     );
+    updateSnapshot({
+      state: 'DISCONNECTED',
+      effectiveUrl: '',
+      isConfigured: false,
+      lastCheckedAt: new Date().toISOString(),
+      lastHttpStatus: null,
+      lastError: err.message,
+    });
+    throw err;
   }
 
-  const text = await res.text();
+  return {
+    baseUrl,
+    url: joinApiUrl(baseUrl, endpoint),
+  };
+}
 
-  if (text.trim().startsWith('<') || text.includes('<!doctype') || text.includes('<html')) {
-    throw new Error(
-      `SURYA Backend Error: Received HTML webpage instead of JSON API from ${url} (HTTP ${res.status}). Ensure the SURYA backend server is running.`
-    );
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  externalSignal?: AbortSignal
+): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  let userAborted = false;
+
+  const onExternalAbort = () => {
+    userAborted = true;
+    controller.abort();
+  };
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      userAborted = true;
+      controller.abort();
+    } else {
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
   }
 
-  let data: any;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
   try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(`Invalid JSON received from ${url} (HTTP ${res.status}): ${text.slice(0, 100)}`);
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    throw classifyNetworkException(err, url, { timedOut, userAborted });
+  } finally {
+    clearTimeout(timer);
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
+  }
+}
+
+async function requestJson<T>(
+  endpoint: string,
+  options: RequestInit & { timeoutMs?: number; maxRetries?: number } = {}
+): Promise<T> {
+  const { url } = buildEndpointUrl(endpoint);
+  const method = (options.method || 'GET').toUpperCase();
+  const isIdempotent = method === 'GET' || method === 'HEAD';
+  const maxRetries = typeof options.maxRetries === 'number' ? options.maxRetries : isIdempotent ? 2 : 1;
+  const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
+  const hasJsonBody = typeof options.body === 'string';
+  const headers = buildRequestHeaders(options.headers, hasJsonBody, 'application/json');
+
+  let attempt = 0;
+  let lastError: GatewayHttpError | null = null;
+
+  while (attempt <= maxRetries) {
+    try {
+      const res = await fetchWithTimeout(
+        url,
+        {
+          ...options,
+          headers,
+        },
+        timeoutMs,
+        options.signal ?? undefined
+      );
+
+      const contentType = res.headers.get('content-type') || '';
+      const text = await res.text();
+
+      if (looksLikeHtmlPayload(text, contentType)) {
+        throw classifyResponseFailure({
+          url,
+          status: res.status,
+          contentType,
+          bodyText: text,
+          redirected: res.redirected,
+          responseUrl: res.url,
+        });
+      }
+
+      if (!res.ok) {
+        throw classifyResponseFailure({
+          url,
+          status: res.status,
+          contentType,
+          bodyText: text,
+          redirected: res.redirected,
+          responseUrl: res.url,
+        });
+      }
+
+      let data: any;
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        throw new GatewayHttpError(`Invalid JSON received from ${url} (HTTP ${res.status}): ${text.slice(0, 100)}`, {
+          code: 'INVALID_JSON',
+          status: res.status,
+          connectionState: 'SERVER_ERROR',
+          retryable: false,
+          url,
+        });
+      }
+
+      if (endpoint === '/api/health') {
+        const now = new Date().toISOString();
+        updateSnapshot({
+          state: 'CONNECTED',
+          effectiveUrl: getApiBaseUrl(),
+          isConfigured: isBackendConfigured(),
+          isPreviewUrl: isAiStudioPreviewUrl(getApiBaseUrl()),
+          lastCheckedAt: now,
+          lastSuccessAt: now,
+          lastHttpStatus: res.status,
+          lastError: null,
+          serverModel: data?.activeModel || null,
+          authRequired: Boolean(data?.authRequired),
+          geminiConfigured: typeof data?.geminiConfigured === 'boolean' ? data.geminiConfigured : null,
+        });
+      } else if (connectionSnapshot.state !== 'CONNECTED') {
+        const now = new Date().toISOString();
+        updateSnapshot({
+          state: 'CONNECTED',
+          lastCheckedAt: now,
+          lastSuccessAt: now,
+          lastHttpStatus: res.status,
+          lastError: null,
+        });
+      }
+
+      return data as T;
+    } catch (err: any) {
+      const gwErr =
+        err instanceof GatewayHttpError
+          ? err
+          : classifyNetworkException(err, url);
+      lastError = gwErr;
+
+      // Update connection state machine for non-abort failures
+      if (gwErr.code !== 'ABORTED') {
+        updateSnapshot({
+          state: gwErr.connectionState,
+          effectiveUrl: getApiBaseUrl(),
+          isConfigured: isBackendConfigured(),
+          isPreviewUrl: isAiStudioPreviewUrl(getApiBaseUrl()),
+          lastCheckedAt: new Date().toISOString(),
+          lastHttpStatus: gwErr.status,
+          lastError: gwErr.message,
+        });
+      }
+
+      // Only retry transient network/timeout/502/503/504 errors within bound
+      if (!gwErr.retryable || attempt >= maxRetries) {
+        throw gwErr;
+      }
+
+      const backoffMs = 300 * Math.pow(2, attempt);
+      attempt += 1;
+      await sleep(backoffMs);
+    }
   }
 
-  if (!res.ok) {
-    throw new Error(data?.error || `Server returned status ${res.status}`);
-  }
+  throw lastError || new GatewayHttpError('Unknown backend request error', { url });
+}
 
-  return data;
+export async function checkBackendConnection(): Promise<SystemHealthData> {
+  updateSnapshot({
+    state: 'CONNECTING',
+    effectiveUrl: getApiBaseUrl(),
+    isConfigured: isBackendConfigured(),
+    isPreviewUrl: isAiStudioPreviewUrl(getApiBaseUrl()),
+    lastCheckedAt: new Date().toISOString(),
+    lastError: null,
+  });
+
+  return requestJson<SystemHealthData>('/api/health', {
+    method: 'GET',
+    timeoutMs: HEALTH_TIMEOUT_MS,
+    maxRetries: 1,
+  });
 }
 
 export const apiService = {
   getApiBaseUrl,
   setApiBaseUrl,
+  getApiToken,
+  setApiToken,
+  getMaskedApiToken,
+  getOrCreateClientId,
+  isBackendConfigured,
+  getConnectionStatus,
+  subscribeConnectionState,
+  checkBackendConnection,
+  validateBackendUrl,
+  normalizeBackendUrl,
+  joinApiUrl,
+  isAiStudioPreviewUrl,
 
   async sendChatMessage(
     message: string,
@@ -132,6 +554,7 @@ export const apiService = {
   ): Promise<{ text: string; model?: string; latencyMs?: number; suggestedAction?: any; timestamp: string }> {
     return requestJson('/api/chat', {
       method: 'POST',
+      signal: clientContext.signal,
       body: JSON.stringify({
         message,
         history,
@@ -155,42 +578,74 @@ export const apiService = {
     onChunk: (accumulatedText: string) => void,
     clientContext: ClientChatContext = {}
   ): Promise<{ text: string; model?: string; latencyMs?: number; ttftMs?: number; timestamp: string }> {
-    const baseUrl = getApiBaseUrl();
-    const url = `${baseUrl}/api/chat/stream`;
+    const { url } = buildEndpointUrl('/api/chat/stream');
+    const headers = buildRequestHeaders(undefined, true, 'text/event-stream');
+
+    let receivedAnyChunk = false;
 
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'text/event-stream',
+      const res = await fetchWithTimeout(
+        url,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            message,
+            history,
+            model: clientContext?.model || 'gemini-4-hydrogen',
+            fastMode: clientContext?.fastMode ?? (clientContext?.responseMode !== 'detailed'),
+            responseMode: clientContext?.responseMode || 'concise',
+            preferredLanguage: clientContext?.preferredLanguage || 'auto',
+            userMemories: clientContext?.userMemories || [],
+            deviceContext: clientContext?.deviceContext,
+          }),
         },
-        body: JSON.stringify({
-          message,
-          history,
-          model: clientContext?.model || 'gemini-4-hydrogen',
-          fastMode: clientContext?.fastMode ?? (clientContext?.responseMode !== 'detailed'),
-          responseMode: clientContext?.responseMode || 'concise',
-          preferredLanguage: clientContext?.preferredLanguage || 'auto',
-          userMemories: clientContext?.userMemories || [],
-          deviceContext: clientContext?.deviceContext,
-        }),
-      });
+        STREAM_TIMEOUT_MS,
+        clientContext.signal
+      );
+
+      const contentType = res.headers.get('content-type') || '';
 
       if (!res.ok) {
         const text = await res.text();
-        if (text.trim().startsWith('<') || text.includes('<!doctype')) {
-          throw new Error(`Received HTML from ${url} (HTTP ${res.status}).`);
-        }
-        let parsed: any = {};
-        try {
-          parsed = JSON.parse(text);
-        } catch {}
-        throw new Error(parsed.error || `Stream failed with HTTP ${res.status}`);
+        const gwErr = classifyResponseFailure({
+          url,
+          status: res.status,
+          contentType,
+          bodyText: text,
+          redirected: res.redirected,
+          responseUrl: res.url,
+        });
+        updateSnapshot({
+          state: gwErr.connectionState,
+          lastCheckedAt: new Date().toISOString(),
+          lastHttpStatus: gwErr.status,
+          lastError: gwErr.message,
+        });
+        throw gwErr;
+      }
+
+      if (looksLikeHtmlPayload('', contentType)) {
+        const gwErr = classifyResponseFailure({
+          url,
+          status: res.status,
+          contentType,
+          bodyText: '<!doctype html>',
+          redirected: res.redirected,
+          responseUrl: res.url,
+        });
+        updateSnapshot({
+          state: gwErr.connectionState,
+          lastCheckedAt: new Date().toISOString(),
+          lastHttpStatus: gwErr.status,
+          lastError: gwErr.message,
+        });
+        throw gwErr;
       }
 
       if (!res.body) {
-        throw new Error('ReadableStream not supported on this device');
+        // Transport-level limitation (no ReadableStream) — fall back to /api/chat
+        return this.sendChatMessage(message, history, clientContext);
       }
 
       const reader = res.body.getReader();
@@ -229,17 +684,31 @@ export const apiService = {
           } else if (event.type === 'ttft' && typeof event.ttftMs === 'number') {
             ttftMs = event.ttftMs;
           } else if (event.type === 'chunk' && typeof event.text === 'string') {
+            receivedAnyChunk = true;
             accumulatedText += event.text;
             onChunk(accumulatedText);
           } else if (typeof event.chunk === 'string') {
+            receivedAnyChunk = true;
             accumulatedText += event.chunk;
             onChunk(accumulatedText);
           } else if (event.type === 'error' || event.error) {
-            throw new Error(event.error || 'Stream error received from SURYA engine');
+            throw new GatewayHttpError(event.error || 'Stream error received from SURYA engine', {
+              code: 'SERVER_ERROR',
+              connectionState: 'SERVER_ERROR',
+              retryable: false,
+              url,
+            });
           } else if (event.type === 'done' || event.done) {
             if (event.model) metaModel = event.model;
             totalTimeMs = event.totalTimeMs ?? event.latencyMs;
             ttftMs = ttftMs ?? event.firstTokenMs;
+            updateSnapshot({
+              state: 'CONNECTED',
+              lastSuccessAt: new Date().toISOString(),
+              lastCheckedAt: new Date().toISOString(),
+              lastHttpStatus: 200,
+              lastError: null,
+            });
             return {
               text: accumulatedText || event.fullText || '',
               model: metaModel,
@@ -251,6 +720,16 @@ export const apiService = {
         }
       }
 
+      if (accumulatedText) {
+        updateSnapshot({
+          state: 'CONNECTED',
+          lastSuccessAt: new Date().toISOString(),
+          lastCheckedAt: new Date().toISOString(),
+          lastHttpStatus: 200,
+          lastError: null,
+        });
+      }
+
       return {
         text: accumulatedText,
         model: metaModel,
@@ -259,8 +738,27 @@ export const apiService = {
         timestamp: new Date().toISOString(),
       };
     } catch (err: any) {
-      console.warn('SSE streaming unavailable, falling back to standard chat endpoint:', err.message);
-      return this.sendChatMessage(message, history, clientContext);
+      // Never hide auth, rate-limit, cookie-gateway, HTML, unconfigured, or user-aborted errors
+      if (err instanceof GatewayHttpError) {
+        if (
+          err.code === 'UNCONFIGURED' ||
+          err.code === 'AUTH_REQUIRED' ||
+          err.code === 'RATE_LIMITED' ||
+          err.code === 'COOKIE_GATEWAY_HTML' ||
+          err.code === 'HTML_RESPONSE' ||
+          err.code === 'NOT_FOUND' ||
+          err.code === 'ABORTED'
+        ) {
+          throw err;
+        }
+      }
+
+      // If stream broke mid-way without chunks because SSE proxy wasn't supported, try single JSON chat request
+      if (!receivedAnyChunk) {
+        return this.sendChatMessage(message, history, clientContext);
+      }
+
+      throw err;
     }
   },
 
@@ -427,7 +925,7 @@ export const apiService = {
   },
 
   async deleteMemory(id: string): Promise<{ success: boolean }> {
-    return requestJson(`/api/memory/${id}`, { method: 'DELETE' });
+    return requestJson(`/api/memory/${encodeURIComponent(id)}`, { method: 'DELETE' });
   },
 
   async clearAllMemories(): Promise<{ success: boolean }> {
@@ -454,6 +952,8 @@ export const apiService = {
   async getSecurityReport(): Promise<{
     serverCredentialsIsolated: boolean;
     geminiKeyConfigured: boolean;
+    authTokenEnforced?: boolean;
+    perUserMemoryIsolation?: boolean;
     corsPolicy: string;
     rateLimitingActive: boolean;
     veronicaChallengeCount: number;
@@ -468,11 +968,17 @@ export const apiService = {
 
   // System Health & Diagnostics
   async getSystemHealth(): Promise<SystemHealthData> {
-    return requestJson('/api/health');
+    return checkBackendConnection();
   },
 
-  async verifyGeminiConnection(): Promise<{ success: boolean; model: string; latencyMs: number; response: string }> {
-    return requestJson('/api/config/api-key/verify', { method: 'POST' });
+  async verifyGeminiConnection(): Promise<{
+    success: boolean;
+    model: string;
+    fallbackUsed?: boolean;
+    latencyMs: number;
+    response: string;
+  }> {
+    return requestJson('/api/config/api-key/verify', { method: 'POST', timeoutMs: 25000 });
   },
 
   // Auto-Update Check & Cryptographic Verification

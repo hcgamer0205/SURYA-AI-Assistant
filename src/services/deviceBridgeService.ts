@@ -191,6 +191,24 @@ class DeviceBridgeService {
     }
     return false;
   }
+
+  public launchApp(packageName: string, action?: string, dataUri?: string): boolean {
+    const bridge = typeof window !== 'undefined' ? (window as any).AndroidSuryaBridge : null;
+    if (bridge && typeof bridge.launchIntent === 'function') {
+      try {
+        return Boolean(
+          bridge.launchIntent(
+            action || 'android.intent.action.VIEW',
+            dataUri || '',
+            packageName || ''
+          )
+        );
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
 }
 
 export const deviceBridgeService = new DeviceBridgeService();

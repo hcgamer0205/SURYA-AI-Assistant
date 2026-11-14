@@ -421,6 +421,22 @@ class ProductivityService {
     return false;
   }
 
+  public checkDueReminders(now = new Date()): ReminderItem[] {
+    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const fired: ReminderItem[] = [];
+    for (const rem of this.reminders) {
+      if (!rem.isTriggered && rem.dueTime === hhmm) {
+        rem.isTriggered = true;
+        fired.push({ ...rem });
+        deviceBridgeService.sendNotification('SURYA Reminder', rem.title);
+      }
+    }
+    if (fired.length > 0) {
+      this.saveReminders();
+    }
+    return fired;
+  }
+
   private saveReminders() {
     if (typeof window === 'undefined') return;
     try {

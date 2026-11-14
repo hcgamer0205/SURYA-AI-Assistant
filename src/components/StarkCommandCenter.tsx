@@ -1,21 +1,23 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Send,
-  Bot,
-  User,
   Volume2,
   Square,
-  Terminal,
   ArrowRight,
   RefreshCw,
   Cpu,
-  Clock,
   Settings,
   Mic,
   Trash2,
   Download,
+  MoreHorizontal,
+  SlidersHorizontal,
+  Search,
+  X,
 } from 'lucide-react';
 import { ChatMessage, ResponseMode, StarkActionPlan } from '../types/surya';
+import { apiService, ConnectionStatusSnapshot } from '../services/apiService';
+import { intelligenceRouter } from '../services/intelligenceRouter';
 import { voiceService } from '../services/voiceService';
 import { soundFx } from '../services/soundFx';
 import { uiThemeEngine } from '../services/uiThemeEngine';
@@ -49,16 +51,28 @@ export const StarkCommandCenter: React.FC<StarkCommandCenterProps> = ({
   onOpenTelemetry,
 }) => {
   const [inputText, setInputText] = useState('');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   const [theme, setTheme] = useState<SuryaThemeConfig>(uiThemeEngine.getCurrentTheme());
   const [voiceState, setVoiceState] = useState(voiceService.getState());
+  const [connStatus, setConnStatus] = useState<ConnectionStatusSnapshot>(
+    apiService.getConnectionStatus()
+  );
+  const [routerStatus, setRouterStatus] = useState(() => intelligenceRouter.getEffectiveStatus());
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    const unsubTheme = uiThemeEngine.subscribe((t) => setTheme(t));
-    const unsubVoice = voiceService.subscribe((v) => setVoiceState(v));
+    const unsubTheme = uiThemeEngine.subscribe(setTheme);
+    const unsubVoice = voiceService.subscribe(setVoiceState);
+    const unsubConn = apiService.subscribeConnectionState(setConnStatus);
+    const unsubRouter = intelligenceRouter.subscribe(setRouterStatus);
     return () => {
       unsubTheme();
       unsubVoice();
+      unsubConn();
+      unsubRouter();
     };
   }, []);
 
@@ -68,17 +82,24 @@ export const StarkCommandCenter: React.FC<StarkCommandCenterProps> = ({
     }
   }, [messages, isProcessing]);
 
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    if (menuOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [menuOpen]);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputText.trim() || isProcessing) return;
     soundFx.playClick();
     onSendMessage(inputText.trim());
     setInputText('');
-  };
-
-  const handleSpeak = (text: string) => {
-    soundFx.playClick();
-    voiceService.speak(text);
   };
 
   const handleExportChat = () => {
@@ -89,242 +110,358 @@ export const StarkCommandCenter: React.FC<StarkCommandCenterProps> = ({
     a.download = `surya-conversation-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
+    setMenuOpen(false);
   };
 
-  const tacticalShortcuts = [
+  const quickSuggestions = [
+    'Summarize my day',
     'Open YouTube',
-    'Remember that my workspace prefers concise updates',
-    'SURYA, make your interface holographic blue',
     'Add task Review Android APK build',
-    'SURYA, speak Hindi',
+    'Remember that I prefer concise replies',
   ];
 
-  const primaryCol = theme.palette.primary;
+  const primaryCol = theme.palette.primary || '#d4a84f';
+  const offlineHandledLocally =
+    routerStatus.activePath === 'on-device-llm' ||
+    (routerStatus.mode === 'offline' && routerStatus.localReady);
+  const showGatewayBanner =
+    !offlineHandledLocally &&
+    routerStatus.mode !== 'offline' &&
+    (connStatus.state === 'AUTHENTICATION_REQUIRED' ||
+      connStatus.state === 'RATE_LIMITED' ||
+      connStatus.state === 'SERVER_ERROR' ||
+      !connStatus.isConfigured ||
+      connStatus.isPreviewUrl);
+
+  const visibleMessages = searchQuery.trim()
+    ? messages.filter((m) =>
+        m.content.toLowerCase().includes(searchQuery.trim().toLowerCase())
+      )
+    : messages;
 
   return (
-    <div className="flex flex-col h-full w-full max-w-4xl mx-auto p-4 space-y-3 pb-24">
-      {/* Header */}
-      <div
-        className="flex flex-wrap items-center justify-between gap-2 border-b pb-2.5"
-        style={{ borderColor: `${primaryCol}33` }}
-      >
-        <div className="flex items-center gap-2">
-          <Terminal className="w-5 h-5" style={{ color: primaryCol }} />
-          <div>
-            <h2
-              className="text-sm font-mono font-bold tracking-wider uppercase"
-              style={{ color: primaryCol }}
-            >
-              SURYA CONVERSATION CORE
-            </h2>
-            <span className="text-[10px] text-slate-400">
-              0ms Local Intents · Memory Context · Real-Time SSE Streaming
-            </span>
-          </div>
+    <div className="flex flex-col h-[calc(100vh-7.5rem)] w-full max-w-3xl mx-auto px-4 pt-3 pb-20">
+      {/* Clean Chat Header */}
+      <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-800/80">
+        <div className="min-w-0">
+          <h2 className="text-base font-semibold text-slate-100">Chat</h2>
+          <p className="text-xs text-slate-400 truncate">
+            {routerStatus.mode === 'offline'
+              ? routerStatus.localReady
+                ? `Offline · ${routerStatus.activeLocalModelName}`
+                : 'Offline mode · Local tools only'
+              : routerStatus.activePath === 'on-device-llm'
+              ? `On-device · ${routerStatus.activeLocalModelName}`
+              : `${responseMode === 'concise' ? 'Concise' : 'Detailed'} · ${routerStatus.mode}`}
+          </p>
         </div>
 
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <div className="flex items-center p-0.5 rounded-lg bg-slate-900 border border-slate-800 text-[10px] font-mono">
-            <button
-              onClick={() => onChangeResponseMode('concise')}
-              className={`px-2 py-1 rounded ${
-                responseMode === 'concise' ? 'bg-amber-500 text-slate-950 font-bold' : 'text-slate-400'
-              }`}
-            >
-              CONCISE
-            </button>
-            <button
-              onClick={() => onChangeResponseMode('detailed')}
-              className={`px-2 py-1 rounded ${
-                responseMode === 'detailed' ? 'bg-amber-500 text-slate-950 font-bold' : 'text-slate-400'
-              }`}
-            >
-              DETAILED
-            </button>
-          </div>
-
+        <div className="flex items-center gap-2">
           {onOpenModelModal && (
             <button
-              onClick={onOpenModelModal}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 border text-[11px] font-mono transition-colors"
-              style={{ borderColor: `${primaryCol}44`, color: primaryCol }}
+              type="button"
+              onClick={() => {
+                soundFx.playClick();
+                onOpenModelModal();
+              }}
+              className="min-h-[36px] flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#121826] border border-slate-800 hover:border-slate-700 text-xs text-slate-200 transition-colors"
             >
-              <Cpu className="w-3.5 h-3.5" />
-              <span className="truncate max-w-[120px]">{activeModel}</span>
+              <Cpu className="w-3.5 h-3.5 text-[#d4a84f]" />
+              <span className="truncate max-w-[130px]">
+                {routerStatus.activePath === 'on-device-llm' && routerStatus.activeLocalModelName
+                  ? routerStatus.activeLocalModelName
+                  : activeModel}
+              </span>
             </button>
           )}
 
           <button
-            onClick={handleExportChat}
-            aria-label="Export conversation history"
-            title="Export JSON"
-            className="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-amber-300"
+            type="button"
+            onClick={() => {
+              soundFx.playClick();
+              setShowSearch((prev) => !prev);
+            }}
+            aria-label="Search conversation history"
+            className={`min-h-[36px] min-w-[36px] p-2 rounded-xl border flex items-center justify-center transition-colors ${
+              showSearch
+                ? 'bg-[#d4a84f] text-slate-950 border-[#d4a84f]'
+                : 'bg-[#121826] border-slate-800 hover:border-slate-700 text-slate-300'
+            }`}
           >
-            <Download className="w-3.5 h-3.5" />
+            <Search className="w-4 h-4" />
           </button>
 
-          {onClearHistory && (
+          {/* Overflow Menu */}
+          <div className="relative" ref={menuRef}>
             <button
-              onClick={onClearHistory}
-              aria-label="Clear conversation history"
-              title="Clear conversation"
-              className="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-rose-400"
+              type="button"
+              onClick={() => {
+                soundFx.playClick();
+                setMenuOpen((prev) => !prev);
+              }}
+              aria-label="Conversation options"
+              aria-expanded={menuOpen}
+              className="min-h-[36px] min-w-[36px] p-2 rounded-xl bg-[#121826] border border-slate-800 hover:border-slate-700 text-slate-300 flex items-center justify-center transition-colors"
             >
-              <Trash2 className="w-3.5 h-3.5" />
+              <MoreHorizontal className="w-4 h-4" />
             </button>
-          )}
+
+            {menuOpen && (
+              <div className="absolute right-0 mt-2 w-56 rounded-2xl bg-[#121826] border border-slate-800 shadow-xl py-1.5 z-30">
+                <div className="px-3 py-2 border-b border-slate-800/80">
+                  <div className="flex items-center gap-1.5 text-xs text-slate-400 mb-1.5">
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                    <span>Response Mode</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1 p-0.5 rounded-lg bg-[#0b0f17] border border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundFx.playClick();
+                        onChangeResponseMode('concise');
+                      }}
+                      className={`py-1 rounded-md text-xs font-medium transition-colors ${
+                        responseMode === 'concise'
+                          ? 'bg-[#d4a84f] text-slate-950'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      Concise
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundFx.playClick();
+                        onChangeResponseMode('detailed');
+                      }}
+                      className={`py-1 rounded-md text-xs font-medium transition-colors ${
+                        responseMode === 'detailed'
+                          ? 'bg-[#d4a84f] text-slate-950'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      Detailed
+                    </button>
+                  </div>
+                </div>
+
+                {onOpenTelemetry && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onOpenTelemetry();
+                    }}
+                    className="w-full px-3.5 py-2.5 text-left text-xs text-slate-200 hover:bg-slate-800/60 flex items-center gap-2.5"
+                  >
+                    <Settings className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Backend &amp; Gemini Settings</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleExportChat}
+                  className="w-full px-3.5 py-2.5 text-left text-xs text-slate-200 hover:bg-slate-800/60 flex items-center gap-2.5"
+                >
+                  <Download className="w-3.5 h-3.5 text-slate-400" />
+                  <span>Export Conversation</span>
+                </button>
+
+                {onClearHistory && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onClearHistory();
+                    }}
+                    className="w-full px-3.5 py-2.5 text-left text-xs text-rose-300 hover:bg-rose-950/30 flex items-center gap-2.5"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Clear Conversation</span>
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Shortcuts */}
-      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
-        {tacticalShortcuts.map((shortcut, i) => (
-          <button
-            key={i}
-            onClick={() => {
-              soundFx.playClick();
-              onSendMessage(shortcut);
-            }}
-            disabled={isProcessing}
-            className="min-h-[34px] px-3 py-1 rounded-lg bg-slate-900 border border-slate-800 hover:border-amber-500/40 text-slate-300 hover:text-amber-200 text-[11px] font-mono whitespace-nowrap transition-all active:scale-95"
-          >
-            {shortcut}
-          </button>
-        ))}
-      </div>
+      {/* Local History Search Bar */}
+      {showSearch && (
+        <div className="mt-2.5 flex items-center gap-2">
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search local conversation history..."
+            aria-label="Filter local conversation history"
+            className="flex-1 min-h-[38px] px-3 rounded-xl bg-[#121826] border border-slate-800 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-[#d4a84f]"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              aria-label="Clear search"
+              className="min-h-[38px] px-2.5 rounded-xl bg-[#121826] border border-slate-800 text-slate-400 hover:text-slate-200"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      )}
 
-      {/* Messages Scroll Area */}
+      {/* Actionable Gateway Banner when needed */}
+      {showGatewayBanner && (
+        <div className="mt-3 px-3.5 py-2.5 rounded-xl bg-amber-950/35 border border-amber-500/30 text-xs text-amber-100 flex flex-wrap items-center justify-between gap-2">
+          <span className="flex-1 min-w-[200px]">
+            {connStatus.lastError ||
+              `Connection issue (${connStatus.state.toLowerCase().replace(/_/g, ' ')}). Check Backend Settings.`}
+          </span>
+          {onOpenTelemetry && (
+            <button
+              type="button"
+              onClick={onOpenTelemetry}
+              className="px-3 py-1.5 rounded-lg bg-[#d4a84f] text-slate-950 font-medium text-xs shrink-0"
+            >
+              Open Settings
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Messages Area */}
       <div
         ref={chatScrollRef}
-        className="flex-1 overflow-y-auto space-y-3 pr-1 max-h-[56vh] min-h-[42vh]"
+        className="flex-1 overflow-y-auto py-4 space-y-4 pr-1"
       >
-        {messages.map((msg) => (
-          <div
-            key={msg.id}
-            className={`flex gap-3 ${
-              msg.role === 'user' ? 'justify-end' : 'justify-start'
-            }`}
-          >
-            {msg.role !== 'user' && (
-              <div
-                className="w-8 h-8 rounded-lg border flex items-center justify-center shrink-0 mt-0.5"
-                style={{
-                  backgroundColor: `${primaryCol}15`,
-                  borderColor: `${primaryCol}44`,
-                }}
-              >
-                <Bot className="w-4 h-4" style={{ color: primaryCol }} />
-              </div>
-            )}
+        {visibleMessages.length === 0 && searchQuery.trim() && (
+          <p className="text-xs text-slate-400 text-center py-6">
+            No local messages matching &ldquo;{searchQuery.trim()}&rdquo;.
+          </p>
+        )}
+        {visibleMessages.map((msg) => {
+          const isUser = msg.role === 'user';
+          const isSystem = msg.role === 'system';
 
+          return (
             <div
-              className={`max-w-[85%] rounded-2xl px-4 py-3 text-xs leading-relaxed ${
-                msg.role === 'user'
-                  ? 'bg-amber-600/25 border border-amber-500/40 text-slate-100 rounded-tr-none'
-                  : 'bg-slate-900/90 border border-slate-800 text-slate-200 rounded-tl-none shadow-md'
-              }`}
+              key={msg.id}
+              className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}
             >
-              <div className="flex items-center justify-between gap-3 mb-1 text-[10px] font-mono text-slate-400">
-                <span className="font-semibold" style={{ color: primaryCol }}>
-                  {msg.role === 'user' ? 'OPERATOR' : `SURYA AI${msg.model ? ` · ${msg.model}` : ''}`}
-                </span>
-                <div className="flex items-center gap-2 tabular-nums">
-                  {(msg.ttftMs || msg.latencyMs) && (
-                    <span className="text-[9px] text-slate-500 flex items-center gap-0.5">
-                      <Clock className="w-2.5 h-2.5" />
-                      <span>{msg.ttftMs || msg.latencyMs}ms</span>
-                    </span>
+              <div
+                className={`max-w-[86%] sm:max-w-[78%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                  isUser
+                    ? 'bg-[#1a2438] border border-slate-700/70 text-slate-100 rounded-br-sm'
+                    : isSystem
+                    ? 'bg-rose-950/35 border border-rose-500/30 text-rose-100 rounded-bl-sm'
+                    : 'bg-[#121826] border border-slate-800/90 text-slate-100 rounded-bl-sm'
+                }`}
+              >
+                <div className="whitespace-pre-wrap">{msg.content || '...'}</div>
+
+                {isSystem &&
+                  (msg.content.includes('SURYA Backend Error') ||
+                    msg.content.includes('HTML webpage') ||
+                    msg.content.includes('Network connection failed') ||
+                    msg.content.includes('not configured') ||
+                    msg.content.includes('authentication failed') ||
+                    msg.content.includes('Rate limit') ||
+                    msg.content.includes('cookie challenge') ||
+                    msg.content.includes('timed out')) &&
+                  onOpenTelemetry && (
+                    <button
+                      type="button"
+                      onClick={onOpenTelemetry}
+                      className="mt-2.5 px-3 py-1.5 rounded-lg bg-[#d4a84f] text-slate-950 text-xs font-medium inline-flex items-center gap-1.5"
+                    >
+                      <Settings className="w-3.5 h-3.5" />
+                      <span>Configure Backend Gateway</span>
+                    </button>
                   )}
-                  <span>
+
+                {msg.suggestedAction && (
+                  <div className="mt-3 p-3 rounded-xl bg-[#0b0f17] border border-slate-800 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <span className="text-xs font-medium text-slate-100 block truncate">
+                        {msg.suggestedAction.name}
+                      </span>
+                      <span className="text-[11px] text-slate-400 block truncate">
+                        {msg.suggestedAction.riskLevel === 'HIGH' ? 'Requires confirmation · ' : ''}
+                        {msg.suggestedAction.intent}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundFx.playClick();
+                        onExecutePlan(msg.suggestedAction!);
+                      }}
+                      className="min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-medium text-slate-950 flex items-center gap-1 shrink-0"
+                      style={{ backgroundColor: primaryCol }}
+                    >
+                      <span>Run</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+
+                <div className="mt-1.5 flex items-center justify-between gap-4 text-[11px] text-slate-500">
+                  <span className="tabular-nums">
                     {new Date(msg.timestamp).toLocaleTimeString([], {
                       hour: '2-digit',
                       minute: '2-digit',
                     })}
                   </span>
+
+                  {msg.role === 'assistant' && msg.content && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundFx.playClick();
+                        voiceService.speak(msg.content);
+                      }}
+                      aria-label="Speak reply aloud"
+                      className="text-slate-400 hover:text-slate-200 transition-colors p-0.5"
+                      title="Speak aloud"
+                    >
+                      <Volume2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
-
-              <div className="whitespace-pre-wrap font-sans">{msg.content || '...'}</div>
-
-              {msg.role === 'system' &&
-                (msg.content.includes('SURYA Backend Error') ||
-                  msg.content.includes('HTML webpage') ||
-                  msg.content.includes('Network connection failed')) &&
-                onOpenTelemetry && (
-                  <button
-                    onClick={onOpenTelemetry}
-                    className="mt-2.5 px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-amber-300 font-mono text-[11px] font-bold flex items-center gap-1.5 transition-all"
-                  >
-                    <Settings className="w-3.5 h-3.5" />
-                    <span>CONFIGURE BACKEND GATEWAY IN SETTINGS</span>
-                  </button>
-                )}
-
-              {msg.suggestedAction && (
-                <div className="mt-3 p-2.5 rounded-xl bg-slate-950/80 border border-amber-500/30 flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-950 text-amber-400 border border-amber-700/50">
-                        {msg.suggestedAction.riskLevel} RISK
-                      </span>
-                      <span className="text-xs font-mono font-semibold text-slate-100 truncate">
-                        {msg.suggestedAction.name}
-                      </span>
-                    </div>
-                    <span className="text-[10px] font-mono text-slate-400 block truncate mt-0.5">
-                      Intent: {msg.suggestedAction.intent}
-                    </span>
-                  </div>
-
-                  <button
-                    onClick={() => {
-                      soundFx.playClick();
-                      onExecutePlan(msg.suggestedAction!);
-                    }}
-                    className="min-h-[36px] px-3 py-1.5 rounded-lg font-mono text-xs font-bold uppercase flex items-center gap-1 shrink-0 active:scale-95 transition-all text-slate-950 shadow-md"
-                    style={{ backgroundColor: primaryCol }}
-                  >
-                    <span>EXECUTE</span>
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              )}
-
-              {msg.role === 'assistant' && msg.content && (
-                <div className="mt-2 flex justify-end gap-2">
-                  <button
-                    onClick={() => handleSpeak(msg.content)}
-                    aria-label="Speak response aloud"
-                    className="text-slate-400 hover:text-amber-300 transition-colors p-1"
-                    title="Speak aloud"
-                  >
-                    <Volume2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              )}
             </div>
+          );
+        })}
 
-            {msg.role === 'user' && (
-              <div className="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center shrink-0 mt-0.5">
-                <User className="w-4 h-4 text-slate-300" />
-              </div>
-            )}
+        {messages.length <= 1 && !isProcessing && (
+          <div className="flex flex-wrap gap-2 pt-2">
+            {quickSuggestions.map((prompt) => (
+              <button
+                key={prompt}
+                type="button"
+                onClick={() => {
+                  soundFx.playClick();
+                  onSendMessage(prompt);
+                }}
+                className="px-3 py-1.5 rounded-xl bg-[#121826] border border-slate-800 hover:border-slate-700 text-xs text-slate-300 transition-colors"
+              >
+                {prompt}
+              </button>
+            ))}
           </div>
-        ))}
+        )}
 
         {isProcessing && (
-          <div
-            className="flex items-center gap-2 text-xs font-mono p-2"
-            style={{ color: primaryCol }}
-          >
-            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-            <span>SURYA STREAMING RESPONSE...</span>
+          <div className="flex items-center gap-2 text-xs text-slate-400 px-1">
+            <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#60a5fa]" />
+            <span>SURYA is thinking...</span>
           </div>
         )}
       </div>
 
-      {/* Input Bar with Inline Mic & Interrupt */}
-      <form onSubmit={handleSubmit} className="relative flex items-center gap-2 pt-1">
+      {/* Bottom Composer */}
+      <form onSubmit={handleSubmit} className="pt-2 flex items-center gap-2">
         {onVoiceCapture && (
           <button
             type="button"
@@ -338,11 +475,11 @@ export const StarkCommandCenter: React.FC<StarkCommandCenterProps> = ({
                 voiceService.startListening(onVoiceCapture);
               }
             }}
-            aria-label={voiceState.isListening ? 'Stop listening' : 'Speak command'}
-            className={`min-h-[44px] min-w-[44px] rounded-xl border flex items-center justify-center transition-all ${
+            aria-label={voiceState.isListening ? 'Stop voice input' : 'Voice input'}
+            className={`min-h-[44px] min-w-[44px] rounded-2xl border flex items-center justify-center transition-colors ${
               voiceState.isListening
-                ? 'bg-cyan-500 text-slate-950 border-cyan-300'
-                : 'bg-slate-900 text-amber-400 border-slate-700 hover:border-amber-400'
+                ? 'bg-[#60a5fa] text-slate-950 border-[#60a5fa]'
+                : 'bg-[#121826] text-slate-300 border-slate-800 hover:border-slate-700'
             }`}
           >
             <Mic className="w-4 h-4" />
@@ -354,7 +491,7 @@ export const StarkCommandCenter: React.FC<StarkCommandCenterProps> = ({
             type="button"
             onClick={() => voiceService.stopSpeaking()}
             aria-label="Stop speaking"
-            className="min-h-[44px] px-3 rounded-xl bg-amber-500/20 border border-amber-400 text-amber-300 text-xs font-mono font-bold flex items-center gap-1"
+            className="min-h-[44px] min-w-[44px] rounded-2xl bg-[#121826] border border-slate-700 text-[#d4a84f] flex items-center justify-center"
           >
             <Square className="w-3.5 h-3.5 fill-current" />
           </button>
@@ -364,15 +501,16 @@ export const StarkCommandCenter: React.FC<StarkCommandCenterProps> = ({
           type="text"
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
-          placeholder="Command SURYA (e.g. 'Open YouTube', 'Remember that...', 'Explain...')..."
-          className="flex-1 min-h-[44px] bg-slate-900 border border-slate-700 rounded-xl px-4 text-xs font-mono text-slate-100 placeholder-slate-500 focus:outline-none transition-colors"
-          style={{ borderColor: `${primaryCol}55` }}
+          placeholder="Message SURYA..."
+          aria-label="Message SURYA"
+          className="flex-1 min-h-[44px] bg-[#121826] border border-slate-800 focus:border-[#d4a84f]/60 rounded-2xl px-4 text-sm text-slate-100 placeholder-slate-500 focus:outline-none transition-colors"
         />
+
         <button
           type="submit"
           disabled={!inputText.trim() || isProcessing}
-          aria-label="Send directive"
-          className="min-h-[44px] min-w-[44px] px-4 rounded-xl disabled:opacity-50 text-slate-950 flex items-center justify-center active:scale-95 transition-all shadow-md font-bold"
+          aria-label="Send message"
+          className="min-h-[44px] min-w-[44px] px-4 rounded-2xl disabled:opacity-40 text-slate-950 flex items-center justify-center active:scale-95 transition-all"
           style={{ backgroundColor: primaryCol }}
         >
           <Send className="w-4 h-4" />

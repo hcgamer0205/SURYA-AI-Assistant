@@ -1,23 +1,23 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Cpu,
-  Zap,
-  Eye,
-  Wrench,
-  Check,
-  ShieldAlert,
-  Activity,
   X,
-  Radio,
-  Sparkles,
+  Activity,
+  HardDrive,
+  Download,
 } from 'lucide-react';
 import { soundFx } from '../services/soundFx';
 import { apiService } from '../services/apiService';
+import { OFFLINE_MODEL_CATALOG, formatBytes } from '../services/offlineModelHelpers.js';
+import { modelDownloadManager } from '../services/modelDownloadManager';
+import { localInferenceRuntime } from '../services/localInferenceRuntime';
+import { intelligenceRouter } from '../services/intelligenceRouter';
 
 interface ModelSelectorModalProps {
   onClose: () => void;
   activeModel: string;
   onSelectModel: (modelId: string) => void;
+  onOpenOfflineStore?: () => void;
 }
 
 interface ModelInfo {
@@ -26,61 +26,41 @@ interface ModelInfo {
   provider: string;
   latency: string;
   speedRating: 'Fastest' | 'High Performance' | 'Balanced';
-  streaming: boolean;
-  vision: boolean;
-  tools: boolean;
   description: string;
-  isEligibleFallback: boolean;
 }
 
 const AVAILABLE_MODELS: ModelInfo[] = [
   {
-    id: 'gemini-3.8-flash',
-    name: 'Gemini 3.8 Flash (Primary)',
-    provider: 'Google Gemini',
-    latency: '~280ms TTFT',
+    id: 'gemini-4-hydrogen',
+    name: 'Gemini 4 Hydrogen',
+    provider: 'Cloud Gemini',
+    latency: '~260ms TTFT',
     speedRating: 'High Performance',
-    streaming: true,
-    vision: true,
-    tools: true,
-    description: 'High-speed multimodal reasoning model optimized for real-time mobile assistant interactions.',
-    isEligibleFallback: false,
+    description: 'Primary multimodal reasoning model for fast everyday assistance.',
   },
   {
     id: 'gemini-3.1-flash-lite',
-    name: 'Gemini 3.1 Flash-Lite (Fallback)',
-    provider: 'Google Gemini',
+    name: 'Gemini 3.1 Flash-Lite',
+    provider: 'Cloud Gemini',
     latency: '~160ms TTFT',
     speedRating: 'Fastest',
-    streaming: true,
-    vision: true,
-    tools: true,
-    description: 'Ultra-lightweight low-latency model automatically routed when primary model experiences high load or 429 quotas.',
-    isEligibleFallback: true,
-  },
-  {
-    id: 'gemini-flash-latest',
-    name: 'Gemini Flash Latest',
-    provider: 'Google Gemini',
-    latency: '~310ms TTFT',
-    speedRating: 'Balanced',
-    streaming: true,
-    vision: true,
-    tools: true,
-    description: 'Stable general production flash checkpoint for robust natural dialogue and task execution.',
-    isEligibleFallback: true,
+    description: 'Low-latency lightweight cloud model with automatic fallback.',
   },
   {
     id: 'gemini-4-argon',
-    name: 'Gemini 4 Argon (Experimental)',
-    provider: 'Google Gemini',
+    name: 'Gemini 4 Argon',
+    provider: 'Cloud Gemini',
     latency: '~390ms TTFT',
     speedRating: 'High Performance',
-    streaming: true,
-    vision: true,
-    tools: true,
-    description: 'Advanced reasoning preview model for complex multi-step planning and deep code generation.',
-    isEligibleFallback: false,
+    description: 'Deeper reasoning model for complex multi-step planning and coding.',
+  },
+  {
+    id: 'gemini-4-carbon',
+    name: 'Gemini 4 Carbon',
+    provider: 'Cloud Gemini',
+    latency: '~310ms TTFT',
+    speedRating: 'Balanced',
+    description: 'Balanced multimodal model for code debugging and structured answers.',
   },
 ];
 
@@ -88,176 +68,254 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
   onClose,
   activeModel,
   onSelectModel,
+  onOpenOfflineStore,
 }) => {
-  const [selectedId, setSelectedId] = useState(activeModel || 'gemini-3.8-flash');
-  const [fastModeEnabled, setFastModeEnabled] = useState(true);
-  const [autoFallbackEnabled, setAutoFallbackEnabled] = useState(true);
+  const [selectedId, setSelectedId] = useState(activeModel || 'gemini-4-hydrogen');
+  const [routerStatus, setRouterStatus] = useState(() => intelligenceRouter.getEffectiveStatus());
+  const [runtimeState, setRuntimeState] = useState(() => localInferenceRuntime.getState());
+  const [downloadedIds, setDownloadedIds] = useState<string[]>(() =>
+    modelDownloadManager.getDownloadedModels().map((d) => d.modelId)
+  );
   const [testResult, setTestResult] = useState<string | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
 
-  const handleSelect = (id: string) => {
+  useEffect(() => {
+    const unsubRouter = intelligenceRouter.subscribe(setRouterStatus);
+    const unsubRt = localInferenceRuntime.subscribe(setRuntimeState);
+    const unsubDl = modelDownloadManager.subscribe(() => {
+      setDownloadedIds(modelDownloadManager.getDownloadedModels().map((d) => d.modelId));
+    });
+    return () => {
+      unsubRouter();
+      unsubRt();
+      unsubDl();
+    };
+  }, []);
+
+  const handleSelectCloud = (id: string) => {
     soundFx.playClick();
     setSelectedId(id);
     onSelectModel(id);
   };
 
-  const handleTestConnection = async () => {
-    soundFx.playAuthorize();
-    setTestResult('Testing connection to Google Gemini API gateway...');
+  const handleToggleLocalModel = async (modelId: string) => {
+    soundFx.playClick();
+    setLocalError(null);
     try {
-      const health = await apiService.getSystemHealth();
-      if (health?.status) {
-        setTestResult(`Connection verified: Gemini AI gateway ${health.status}. Model: ${health.activeModel}.`);
+      if (runtimeState.activeModelId === modelId) {
+        await localInferenceRuntime.unloadModel();
       } else {
-        setTestResult('Connection verified: Gemini AI gateway active.');
+        await localInferenceRuntime.loadModel(modelId);
+        soundFx.playAuthorize();
       }
     } catch (e: any) {
-      setTestResult(`Gateway connection error: ${e.message}`);
+      soundFx.playAbort();
+      setLocalError(e?.message || 'Unable to load offline model.');
     }
   };
+
+  const handleTestConnection = async () => {
+    soundFx.playClick();
+    setTestResult('Checking Gemini backend gateway...');
+    try {
+      const health = await apiService.getSystemHealth();
+      setTestResult(
+        health?.status
+          ? `Connected · Backend ${health.status} · Model: ${health.activeModel}`
+          : 'Connected · Gemini backend active.'
+      );
+    } catch (e: any) {
+      setTestResult(`Backend unreachable: ${e?.message || 'Check network or switch to Offline mode.'}`);
+    }
+  };
+
+  const downloadedCatalogModels = OFFLINE_MODEL_CATALOG.filter((m) =>
+    downloadedIds.includes(m.id)
+  );
 
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-label="AI Model Selector"
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-slate-950/85 backdrop-blur-md animate-in fade-in"
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-[#05080f]/85 backdrop-blur-md"
     >
-      <div className="w-full max-w-xl max-h-[90vh] flex flex-col bg-slate-900 border border-amber-500/40 rounded-2xl shadow-2xl overflow-hidden font-sans">
+      <div className="w-full max-w-xl max-h-[90vh] flex flex-col bg-[#121826] border border-slate-800 rounded-2xl shadow-2xl overflow-hidden font-sans">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 bg-slate-950/80 border-b border-slate-800">
-          <div className="flex items-center gap-2">
-            <Cpu className="w-5 h-5 text-amber-400" />
+        <div className="flex items-center justify-between px-4 py-3 bg-[#0b0f17] border-b border-slate-800">
+          <div className="flex items-center gap-2.5">
+            <Cpu className="w-4 h-4 text-[#d4a84f]" />
             <div>
-              <h2 className="text-sm font-mono font-bold text-amber-300 tracking-wider uppercase">
-                AI MODEL ENGINE & PROVIDER SELECTOR
-              </h2>
-              <p className="text-[10px] text-slate-400">Dynamic model switching, latency benchmarks & automated fallback</p>
+              <h2 className="text-sm font-semibold text-slate-100">Model &amp; Routing Selector</h2>
+              <p className="text-xs text-slate-400">
+                Choose Cloud Gemini, On-Device AI, or automatic routing
+              </p>
             </div>
           </div>
           <button
+            type="button"
             onClick={() => {
               soundFx.playClick();
               onClose();
             }}
             aria-label="Close modal"
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white bg-slate-800 transition-colors"
+            className="min-h-[36px] min-w-[36px] rounded-xl text-slate-400 hover:text-white bg-[#121826] border border-slate-800 flex items-center justify-center"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Content Body */}
+        {/* Body */}
         <div className="flex-1 p-4 overflow-y-auto space-y-4">
-          {/* Models List */}
-          <div className="space-y-2.5">
-            <span className="text-xs font-mono font-bold text-slate-300 block uppercase">
-              CONFIGURED AI MODELS
-            </span>
+          {/* Routing Mode */}
+          <div className="p-3 rounded-xl bg-[#0b0f17] border border-slate-800 space-y-2">
+            <span className="text-xs font-medium text-slate-200 block">Intelligence Mode</span>
+            <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-[#121826] border border-slate-800">
+              {(['auto', 'online', 'offline'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => {
+                    soundFx.playClick();
+                    intelligenceRouter.setMode(m);
+                  }}
+                  className={`min-h-[36px] rounded-lg text-xs font-medium capitalize transition-colors ${
+                    routerStatus.mode === m
+                      ? 'bg-[#d4a84f] text-slate-950 font-semibold'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Downloaded On-Device Models */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
+                <HardDrive className="w-3.5 h-3.5 text-[#60a5fa]" />
+                <span>On-Device Offline Models</span>
+              </span>
+              {onOpenOfflineStore && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundFx.playClick();
+                    onClose();
+                    onOpenOfflineStore();
+                  }}
+                  className="text-xs text-[#d4a84f] hover:underline flex items-center gap-1"
+                >
+                  <Download className="w-3 h-3" />
+                  <span>Open Model Store</span>
+                </button>
+              )}
+            </div>
+
+            {localError && (
+              <div className="p-2.5 rounded-lg bg-rose-950/35 border border-rose-500/30 text-xs text-rose-200">
+                {localError}
+              </div>
+            )}
+
+            {downloadedCatalogModels.length === 0 ? (
+              <div className="p-3 rounded-xl bg-[#0b0f17] border border-slate-800 text-xs text-slate-400 flex items-center justify-between gap-2">
+                <span>No local models downloaded yet.</span>
+                {onOpenOfflineStore && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playClick();
+                      onClose();
+                      onOpenOfflineStore();
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-[#60a5fa] text-slate-950 font-semibold text-xs shrink-0"
+                  >
+                    Download Model
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {downloadedCatalogModels.map((model) => {
+                  const isActive = runtimeState.activeModelId === model.id;
+                  return (
+                    <div
+                      key={model.id}
+                      className={`p-3 rounded-xl border flex items-center justify-between gap-3 ${
+                        isActive
+                          ? 'bg-[#161f32] border-[#d4a84f]'
+                          : 'bg-[#0b0f17] border-slate-800'
+                      }`}
+                    >
+                      <div className="min-w-0">
+                        <span className="text-xs font-semibold text-slate-100 block truncate">
+                          {model.displayName}
+                        </span>
+                        <span className="text-[11px] text-slate-400 block tabular-nums">
+                          {model.quantization} · {formatBytes(model.sizeBytes)} · Local
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleLocalModel(model.id)}
+                        className={`min-h-[34px] px-3 rounded-lg text-xs font-medium shrink-0 ${
+                          isActive
+                            ? 'bg-[#121826] border border-slate-700 text-slate-200'
+                            : 'bg-[#d4a84f] text-slate-950 font-semibold'
+                        }`}
+                      >
+                        {isActive ? 'Unload' : 'Activate'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Cloud Gemini Models */}
+          <div className="space-y-2">
+            <span className="text-xs font-medium text-slate-300 block">Cloud Gemini Models</span>
             {AVAILABLE_MODELS.map((model) => {
               const isSelected = selectedId === model.id;
               return (
-                <div
+                <button
+                  type="button"
                   key={model.id}
-                  onClick={() => handleSelect(model.id)}
-                  className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
+                  onClick={() => handleSelectCloud(model.id)}
+                  className={`w-full text-left p-3 rounded-xl border transition-colors ${
                     isSelected
-                      ? 'bg-slate-800 border-amber-400 ring-1 ring-amber-400 shadow-lg shadow-amber-500/20'
-                      : 'bg-slate-950/60 border-slate-800 hover:border-slate-700'
+                      ? 'bg-[#161f32] border-[#d4a84f]'
+                      : 'bg-[#0b0f17] border-slate-800 hover:border-slate-700'
                   }`}
                 >
-                  <div className="flex items-start justify-between mb-1.5">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-slate-100">{model.name}</span>
-                        {isSelected && (
-                          <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-amber-500 text-slate-950 font-bold">
-                            ACTIVE
-                          </span>
-                        )}
-                      </div>
-                      <span className="text-[10px] font-mono text-amber-400 block mt-0.5">
-                        Provider: {model.provider} • Speed: {model.speedRating} ({model.latency})
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-1.5">
-                      {model.vision && (
-                        <span className="p-1 rounded bg-slate-800 text-cyan-400" title="Vision Supported">
-                          <Eye className="w-3.5 h-3.5" />
-                        </span>
-                      )}
-                      {model.tools && (
-                        <span className="p-1 rounded bg-slate-800 text-emerald-400" title="Tool Calling">
-                          <Wrench className="w-3.5 h-3.5" />
-                        </span>
-                      )}
-                      {model.streaming && (
-                        <span className="p-1 rounded bg-slate-800 text-amber-400" title="Real-Time Streaming">
-                          <Radio className="w-3.5 h-3.5" />
-                        </span>
-                      )}
-                    </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-100">{model.name}</span>
+                    <span className="text-[11px] text-[#d4a84f] tabular-nums">
+                      {isSelected ? 'Selected' : model.latency}
+                    </span>
                   </div>
-
-                  <p className="text-[11px] text-slate-300 leading-relaxed">
-                    {model.description}
-                  </p>
-
-                  {model.isEligibleFallback && (
-                    <div className="mt-2 pt-2 border-t border-slate-800/80 flex items-center gap-1.5 text-[10px] font-mono text-slate-400">
-                      <Sparkles className="w-3 h-3 text-amber-400" />
-                      <span>Automatic fallback candidate if primary model is throttled (429/503).</span>
-                    </div>
-                  )}
-                </div>
+                  <p className="text-[11px] text-slate-400 mt-1">{model.description}</p>
+                </button>
               );
             })}
           </div>
 
-          {/* Fallback & Optimization Toggles */}
-          <div className="p-3.5 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-2.5">
-            <span className="text-xs font-mono font-bold text-slate-300 block uppercase">
-              MODEL RESILIENCE & LATENCY SETTINGS
-            </span>
-
-            <label className="flex items-center justify-between cursor-pointer">
-              <div>
-                <span className="text-xs font-bold text-slate-200 block">Bounded Auto-Fallback on 429/503</span>
-                <span className="text-[10px] text-slate-400">Seamlessly routes to flash-lite if high demand is detected</span>
-              </div>
-              <input
-                type="checkbox"
-                checked={autoFallbackEnabled}
-                onChange={(e) => setAutoFallbackEnabled(e.target.checked)}
-                className="w-4 h-4 rounded text-amber-500 focus:ring-amber-400"
-              />
-            </label>
-
-            <label className="flex items-center justify-between cursor-pointer pt-2 border-t border-slate-700/60">
-              <div>
-                <span className="text-xs font-bold text-slate-200 block">Low-Latency Fast Response Mode</span>
-                <span className="text-[10px] text-slate-400">Optimizes token generation parameters for rapid mobile delivery</span>
-              </div>
-              <input
-                type="checkbox"
-                checked={fastModeEnabled}
-                onChange={(e) => setFastModeEnabled(e.target.checked)}
-                className="w-4 h-4 rounded text-amber-500 focus:ring-amber-400"
-              />
-            </label>
-          </div>
-
-          {/* Test Connection Button & Result */}
+          {/* Gateway Test */}
           <div className="space-y-2">
             <button
+              type="button"
               onClick={handleTestConnection}
-              className="w-full py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 font-mono text-xs text-amber-300 font-bold flex items-center justify-center gap-1.5 transition-colors"
+              className="w-full min-h-[40px] px-3 rounded-xl bg-[#0b0f17] hover:bg-slate-800 border border-slate-700 text-xs text-[#60a5fa] font-medium flex items-center justify-center gap-1.5"
             >
               <Activity className="w-3.5 h-3.5" />
-              <span>TEST GEMINI API GATEWAY CONNECTION</span>
+              <span>Test Cloud Gateway</span>
             </button>
             {testResult && (
-              <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] font-mono text-slate-300">
+              <div className="p-2.5 rounded-lg bg-[#0b0f17] border border-slate-800 text-xs text-slate-300">
                 {testResult}
               </div>
             )}
@@ -265,15 +323,16 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-4 py-3 bg-slate-950/90 border-t border-slate-800 flex justify-end">
+        <div className="px-4 py-3 bg-[#0b0f17] border-t border-slate-800 flex justify-end">
           <button
+            type="button"
             onClick={() => {
               soundFx.playClick();
               onClose();
             }}
-            className="px-4 py-2 rounded-xl bg-amber-500 text-slate-950 font-mono text-xs font-bold hover:bg-amber-400 transition-colors"
+            className="min-h-[40px] px-4 py-2 rounded-xl bg-[#d4a84f] text-slate-950 text-xs font-semibold hover:bg-[#e0b65f]"
           >
-            CONFIRM SELECTION
+            Done
           </button>
         </div>
       </div>

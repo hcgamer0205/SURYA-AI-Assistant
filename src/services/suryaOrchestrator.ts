@@ -6,8 +6,8 @@
  */
 
 import { ChatMessage, ResponseMode, TabType } from '../types/surya';
-import { apiService } from './apiService';
 import { deviceBridgeService } from './deviceBridgeService';
+import { intelligenceRouter } from './intelligenceRouter';
 import { knowledgeVaultService } from './knowledgeVaultService';
 import { personalMemoryService } from './personalMemoryService';
 import { productivityService } from './productivityService';
@@ -64,19 +64,19 @@ class SuryaOrchestrator {
     // 2. Navigation voice shortcuts ("open optics", "open studio", "open tasks", "go home")
     if (/^(open|show|go to)\s+(optics|vision|camera hud)/i.test(lower)) {
       callbacks.onNavigateTab?.('optics');
-      const reply = 'Opening SURYA Optics visual workspace.';
+      const reply = 'Opening SURYA Vision workspace.';
       callbacks.onSpeak?.(reply);
       return { responseText: reply, model: 'SURYA Navigator', latencyMs: 5, handledLocally: true };
     }
     if (/^(open|show|go to)\s+(studio|app creator|code)/i.test(lower)) {
       callbacks.onNavigateTab?.('studio');
-      const reply = 'Opening SURYA Studio development workspace.';
+      const reply = 'Opening SURYA Studio workspace.';
       callbacks.onSpeak?.(reply);
       return { responseText: reply, model: 'SURYA Navigator', latencyMs: 5, handledLocally: true };
     }
     if (/^(open|show|go to)\s+(planner|tasks|productivity|agenda|automations)/i.test(lower)) {
       callbacks.onNavigateTab?.('productivity');
-      const reply = 'Opening Tasks, Agenda, and Stark Automations.';
+      const reply = 'Opening Tasks, Agenda, and Automations.';
       callbacks.onSpeak?.(reply);
       return { responseText: reply, model: 'SURYA Navigator', latencyMs: 5, handledLocally: true };
     }
@@ -91,7 +91,7 @@ class SuryaOrchestrator {
         callbacks.onSpeak?.(reply);
         return { responseText: reply, model: 'Personal World Model', latencyMs: Date.now() - startTime, handledLocally: true };
       } else {
-        const reply = 'Personal Memory is currently paused. Enable it in the Memory panel if you want me to save facts.';
+        const reply = 'Personal Memory is currently paused. Enable it in Memory settings if you want me to save facts.';
         callbacks.onSpeak?.(reply);
         return { responseText: reply, model: 'Personal World Model', latencyMs: Date.now() - startTime, handledLocally: true };
       }
@@ -114,12 +114,12 @@ class SuryaOrchestrator {
     if (addTaskMatch && addTaskMatch[1]) {
       const title = addTaskMatch[1].trim();
       const task = productivityService.addTask(title, 'MEDIUM', 'Voice');
-      const reply = `Added task "${task.title}" to your Productivity Planner.`;
+      const reply = `Added task "${task.title}" to your Tasks list.`;
       callbacks.onSpeak?.(reply);
       return { responseText: reply, model: 'Productivity Agent', latencyMs: Date.now() - startTime, handledLocally: true };
     }
 
-    // 5. Gather Real Context & Memories for Cloud Gemini SSE Streaming
+    // 5. Unified Intelligence Router (Online Cloud Gemini / On-Device Local LLM / Local Tools)
     const userMemories = personalMemoryService.isEnabled()
       ? personalMemoryService.getAllMemories().slice(0, 8).map((m) => ({
           key: m.key,
@@ -135,37 +135,31 @@ class SuryaOrchestrator {
         ? `${clean}\n\n[Relevant Knowledge Vault Excerpt: ${vaultHits.map((d) => `${d.title}: ${d.summary}`).join(' | ')}]`
         : clean;
 
-    const streamRes = await apiService.sendChatMessageStream(
-      enrichedMessage,
-      callbacks.history,
-      (partial) => {
-        callbacks.onStreamChunk?.(partial);
+    const routed = await intelligenceRouter.routeMessage(enrichedMessage, {
+      history: callbacks.history,
+      onStreamChunk: callbacks.onStreamChunk,
+      model: callbacks.model,
+      responseMode: callbacks.responseMode,
+      language: callbacks.language,
+      userMemories,
+      deviceContext: {
+        batteryLevel: telemetry.batteryLevel,
+        online: telemetry.online,
+        networkType: telemetry.networkType,
+        activeTab: callbacks.activeTab,
       },
-      {
-        model: callbacks.model,
-        fastMode: callbacks.responseMode === 'concise',
-        responseMode: callbacks.responseMode,
-        preferredLanguage: callbacks.language,
-        userMemories,
-        deviceContext: {
-          batteryLevel: telemetry.batteryLevel,
-          online: telemetry.online,
-          networkType: telemetry.networkType,
-          activeTab: callbacks.activeTab,
-        },
-      }
-    );
+    });
 
-    if (streamRes.text) {
-      callbacks.onSpeak?.(streamRes.text);
+    if (routed.text) {
+      callbacks.onSpeak?.(routed.text);
     }
 
     return {
-      responseText: streamRes.text,
-      model: streamRes.model || callbacks.model,
-      latencyMs: streamRes.latencyMs || Date.now() - startTime,
-      ttftMs: streamRes.ttftMs,
-      handledLocally: false,
+      responseText: routed.text,
+      model: routed.modelLabel,
+      latencyMs: routed.latencyMs || Date.now() - startTime,
+      ttftMs: routed.ttftMs,
+      handledLocally: routed.handledOffline,
     };
   }
 }
