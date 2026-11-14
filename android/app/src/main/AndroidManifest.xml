@@ -5,9 +5,14 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Voice Assistant & Native Speech Bridge -->
+    <!-- Voice Assistant, Hands-Free Mode & Native Speech Bridge -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
     <!-- Standard Optics AR HUD Visual Input -->
     <uses-permission android:name="android.permission.CAMERA" />
@@ -78,7 +83,31 @@
                 <data android:scheme="surya" android:host="assistant" />
             </intent-filter>
 
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+
         </activity>
+
+        <!-- Foreground Service for Visible Hands-Free Microphone Mode -->
+        <service
+            android:name=".SuryaHandsFreeService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- Home Screen Quick Command Widget -->
+        <receiver
+            android:name=".SuryaWidgetProvider"
+            android:exported="true"
+            android:label="@string/widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/surya_widget_info" />
+        </receiver>
 
         <!-- Secure FileProvider for APK Installation Updates -->
         <provider

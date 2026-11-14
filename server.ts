@@ -14,16 +14,57 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-// Security: HTTP Header Hardening
+// Security & CORS: Restricted Origin Policy for Capacitor Android & Authorized Web Hosts
+const DEFAULT_ALLOWED_ORIGINS = [
+  'https://localhost',
+  'http://localhost',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'capacitor://localhost',
+  'ionic://localhost',
+];
+
+function isAllowedOrigin(origin: string | undefined): boolean {
+  if (!origin) return true; // Native mobile / curl / server-to-server requests without browser Origin
+  const envOrigins = (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const appUrl = process.env.APP_URL ? process.env.APP_URL.trim().replace(/\/+$/, '') : '';
+  const allAllowed = [...DEFAULT_ALLOWED_ORIGINS, ...envOrigins, ...(appUrl ? [appUrl] : [])];
+
+  if (allAllowed.includes(origin)) return true;
+  if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return true;
+  if (/^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)) return true;
+  if (/^https?:\/\/192\.168\.\d+\.\d+(:\d+)?$/.test(origin)) return true;
+  if (/^https:\/\/[a-z0-9-]+\.asia-east1\.run\.app$/.test(origin) || /^https:\/\/[a-z0-9-]+\.run\.app$/.test(origin)) {
+    return true;
+  }
+  return false;
+}
+
 app.use((req: Request, res: Response, next: NextFunction) => {
+  const origin = req.headers.origin;
+  if (origin && isAllowedOrigin(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  } else if (!origin) {
+    res.setHeader('Access-Control-Allow-Origin', 'https://localhost');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
+
+  if (req.method === 'OPTIONS') {
+    if (origin && !isAllowedOrigin(origin)) {
+      return res.status(403).json({ error: 'Origin not permitted by SURYA CORS policy.' });
+    }
+    return res.sendStatus(204);
+  }
+
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('X-XSS-Protection', '1; mode=block');
-  res.setHeader(
-    'Content-Security-Policy',
-    "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:;"
-  );
   next();
 });
 
@@ -98,12 +139,19 @@ export interface AIModelMeta {
 
 const AVAILABLE_AI_MODELS: AIModelMeta[] = [
   {
-    id: 'gemini-3.8-flash',
-    name: 'Gemini 3.8 Flash',
-    description: 'Ultra-fast, high-capability default multimodal model with instant TTFT',
-    speed: 'Ultra-Fast',
+    id: 'gemini-4-hydrogen',
+    name: 'Gemini 4 Hydrogen',
+    description: 'Primary intelligent multimodal model with balanced reasoning, speed, and multilingual precision',
+    speed: 'Fast',
     latencyRating: 5,
     isDefault: true,
+  },
+  {
+    id: 'gemini-3.8-flash',
+    name: 'Gemini 3.8 Flash',
+    description: 'Ultra-fast multimodal model tuned for real-time mobile assistant interactions',
+    speed: 'Ultra-Fast',
+    latencyRating: 5,
   },
   {
     id: 'gemini-3.1-flash-lite',
@@ -114,16 +162,9 @@ const AVAILABLE_AI_MODELS: AIModelMeta[] = [
     isFallback: true,
   },
   {
-    id: 'gemini-flash-latest',
-    name: 'Gemini Flash Latest',
-    description: 'Stable general production flash release',
-    speed: 'Fast',
-    latencyRating: 4,
-  },
-  {
     id: 'gemini-4-argon',
     name: 'Gemini 4 Argon',
-    description: 'Complex multi-step reasoning, mathematical STEM, deep research (Paid tier)',
+    description: 'Complex multi-step reasoning, mathematical STEM, deep coding & architecture (Paid tier)',
     speed: 'Deep Reasoning',
     latencyRating: 3,
     isPaid: true,
@@ -142,6 +183,25 @@ function getGeminiClient(): GoogleGenAI | null {
       },
     },
   });
+}
+
+async function generateWithFallback(
+  ai: GoogleGenAI,
+  params: { model: string; contents: any; config?: any },
+  fallbackModel = 'gemini-3.1-flash-lite'
+) {
+  try {
+    return await ai.models.generateContent(params);
+  } catch (err: any) {
+    const isOverloaded =
+      err?.status === 429 ||
+      err?.status === 503 ||
+      (err?.message && (err.message.includes('429') || err.message.includes('503') || err.message.includes('UNAVAILABLE')));
+    if (isOverloaded && params.model !== fallbackModel) {
+      return await ai.models.generateContent({ ...params, model: fallbackModel });
+    }
+    throw err;
+  }
 }
 
 // Sensitive Information Redaction Filters
@@ -494,39 +554,63 @@ app.post('/api/config/api-key/verify', async (req: Request, res: Response) => {
   }
 });
 
-// Helper to construct multilingual system instructions
-function buildSystemInstruction(fastMode: boolean, preferredLanguage?: string): string {
-  const worldModelContext = personalWorldModel
-    .map((m) => `[${m.category.toUpperCase()}] ${m.key}: ${m.value}`)
-    .join('\n');
+// Helper to construct unified multilingual system instructions
+function buildSystemInstruction(
+  fastMode: boolean,
+  preferredLanguage?: string,
+  responseMode: 'concise' | 'detailed' = fastMode ? 'concise' : 'detailed',
+  userMemories: { key: string; value: string; category?: string }[] = [],
+  deviceContext?: { batteryLevel?: number; isCharging?: boolean; online?: boolean; activeTab?: string }
+): string {
+  const combinedMemories = [
+    ...personalWorldModel.map((m) => `[${m.category.toUpperCase()}] ${m.key}: ${m.value}`),
+    ...userMemories
+      .filter((m) => m && typeof m.key === 'string' && typeof m.value === 'string' && !containsSensitiveData(m.value))
+      .slice(0, 12)
+      .map((m) => `[USER_${(m.category || 'context').toUpperCase()}] ${sanitizeContent(m.key)}: ${sanitizeContent(m.value)}`),
+  ].join('\n');
 
-  let instruction = `You are SURYA (Solar Universal Robotic & Youthful Assistant), an ultra-fast, radiant, intelligent personal AI assistant created for Android mobile devices.
+  let instruction = `You are SURYA (Solar Universal Responsive & Yielding Assistant), a refined, intelligent personal AI operating companion for Android inspired by the poise and competence of an executive engineering companion.
 
-Core Traits & Behavioral Guidelines:
-1. RADIANT & CONCISE: Speak with warmth, clarity, energy, and poise. Avoid verbose filler, repetitive corporate apologies, or unnecessary conversational loops.
+Core Identity & Behavioral Directives:
+1. SURYADEV PERSONALITY: Speak with calm authority, clarity, subtle warmth, and zero filler. Never roleplay fake sensor readings or claim an unexecuted device action succeeded.
 2. MULTILINGUAL INTELLIGENCE:
-   - You natively understand and communicate fluently in Indian languages: Hindi (हिन्दी), Bengali (বাংলা), Telugu (తెలుగు), Marathi (मराठी), Tamil (தமிழ்), Gujarati (ગુજરાતી), Kannada (ಕನ್ನಡ), Malayalam (മലയാളം), Punjabi (ਪੰਜਾਬੀ), Odia (ଓଡ଼ିଆ), Assamese (অসমীয়া), Urdu (اردو), Sanskrit (संस्कृतम्), and Hinglish.
-   - You natively communicate fluently in major global languages: English, Japanese (日本語), Korean (한국어), Chinese (中文), Spanish (Español), French (Français), German (Deutsch), Arabic (العربية), etc.
-   - Always respond in the EXACT language or script used by the user, unless the user explicitly requests another language.
-   - For mixed Hindi-English (Hinglish), respond in natural, friendly Hinglish.
-   - For technical terms, preserve accurate terminology, providing English transliteration in parentheses if helpful.
-3. LOCAL INTENT AWARENESS:
-   - For basic device tasks (e.g. launching apps), advise the user or confirm that the native Android launcher will execute it.
-4. NON-WEAPONIZED HUD:
-   - All optical HUD and sensor analyses remain strictly analytical, educational, and peaceful.
+   - Fluently understand and respond in Hindi (हिन्दी), English, and natural Hinglish, as well as Indian regional languages (Bengali, Telugu, Marathi, Tamil, Gujarati, Kannada, Malayalam, Punjabi, Odia, Urdu, Sanskrit) and major global languages.
+   - Mirror the user's language and script unless instructed otherwise.
+3. CONTEXT & DEVICE AWARENESS:
+   - Native Android intents (launching apps, settings, maps, camera) execute via the local Android bridge. When a user asks for a device action requiring confirmation, clearly explain what permission/confirmation is needed.
+   - Keep optical/camera insights strictly educational, analytical, and peaceful.
 
-Current World Model Context:
-${worldModelContext}
+Authorized Personal World Model Context:
+${combinedMemories}
 
-Current Platform: SURYA Android Mobile (SDK 36, Java 21)
-Time: ${new Date().toLocaleTimeString()}`;
+Platform: SURYA Android Mobile (SDK 36, Java 21)
+Local Time: ${new Date().toLocaleTimeString()}`;
 
-  if (preferredLanguage && preferredLanguage !== 'auto') {
-    instruction += `\nUser explicitly prefers replies in language code: ${preferredLanguage}. Respond in that language.`;
+  if (deviceContext && typeof deviceContext === 'object') {
+    const parts: string[] = [];
+    if (typeof deviceContext.batteryLevel === 'number') {
+      parts.push(`Battery: ${deviceContext.batteryLevel}%${deviceContext.isCharging ? ' (Charging)' : ''}`);
+    }
+    if (typeof deviceContext.online === 'boolean') {
+      parts.push(`Network: ${deviceContext.online ? 'Online' : 'Offline'}`);
+    }
+    if (deviceContext.activeTab) {
+      parts.push(`Active Workspace: ${sanitizeContent(String(deviceContext.activeTab))}`);
+    }
+    if (parts.length > 0) {
+      instruction += `\nDevice Telemetry: ${parts.join(' | ')}`;
+    }
   }
 
-  if (fastMode) {
-    instruction += `\nFAST MODE ACTIVE: Keep responses concise, direct, and under 3-4 sentences unless detailed explanation is explicitly asked. Prioritize zero-latency clarity.`;
+  if (preferredLanguage && preferredLanguage !== 'auto') {
+    instruction += `\nUser preferred response language: ${preferredLanguage}.`;
+  }
+
+  if (responseMode === 'concise') {
+    instruction += `\nCONCISE MODE: Keep answers crisp, direct, and under 3-4 sentences unless structured steps or code are explicitly requested.`;
+  } else {
+    instruction += `\nDETAILED MODE: Provide thorough structured reasoning, clear steps, and helpful context while remaining well-organized.`;
   }
 
   return instruction;
@@ -537,10 +621,13 @@ app.post('/api/chat/stream', chatLimiter, async (req: Request, res: Response) =>
   const {
     message,
     history = [],
-    model = 'gemini-3.8-flash',
+    model = 'gemini-4-hydrogen',
     fastMode = true,
+    responseMode,
     preferredLanguage = 'auto',
     autoFallback = true,
+    userMemories = [],
+    deviceContext,
   } = req.body;
 
   if (!message || typeof message !== 'string') {
@@ -571,18 +658,27 @@ app.post('/api/chat/stream', chatLimiter, async (req: Request, res: Response) =>
   };
 
   let clientDisconnected = false;
-  req.on('close', () => {
-    clientDisconnected = true;
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      clientDisconnected = true;
+    }
   });
 
   const cleanMessage = sanitizeContent(message);
-  const systemInstruction = buildSystemInstruction(fastMode, preferredLanguage);
+  const resolvedMode: 'concise' | 'detailed' = responseMode === 'detailed' || !fastMode ? 'detailed' : 'concise';
+  const systemInstruction = buildSystemInstruction(
+    fastMode,
+    preferredLanguage,
+    resolvedMode,
+    Array.isArray(userMemories) ? userMemories : [],
+    deviceContext
+  );
 
-  // Build conversation history (condensed for fast response)
-  const historySlice = fastMode ? history.slice(-4) : history.slice(-8);
+  // Build conversation history
+  const historySlice = resolvedMode === 'concise' ? history.slice(-6) : history.slice(-12);
   const contents: any[] = [];
   for (const msg of historySlice) {
-    if (msg && typeof msg.content === 'string') {
+    if (msg && typeof msg.content === 'string' && (msg.role === 'user' || msg.role === 'assistant')) {
       contents.push({
         role: msg.role === 'assistant' ? 'model' : 'user',
         parts: [{ text: sanitizeContent(msg.content.slice(0, 1500)) }],
@@ -623,6 +719,18 @@ app.post('/api/chat/stream', chatLimiter, async (req: Request, res: Response) =>
           tokenCount++;
           sendSSE({ type: 'chunk', text: sanitizeContent(text) });
         }
+      }
+
+      if (tokenCount === 0 && !clientDisconnected && autoFallback && targetModel !== 'gemini-3.1-flash-lite') {
+        const fallbackTarget = 'gemini-3.1-flash-lite';
+        sendSSE({
+          type: 'fallback',
+          originalModel: targetModel,
+          fallbackModel: fallbackTarget,
+          reason: 'Zero output tokens received from primary model; routing to Flash Lite.',
+        });
+        activeModel = fallbackTarget;
+        return await streamFromModel(fallbackTarget);
       }
       return true;
     } catch (err: any) {
@@ -672,10 +780,13 @@ app.post('/api/chat', chatLimiter, async (req: Request, res: Response) => {
   const {
     message,
     history = [],
-    model = 'gemini-3.8-flash',
+    model = 'gemini-4-hydrogen',
     fastMode = true,
+    responseMode,
     preferredLanguage = 'auto',
     autoFallback = true,
+    userMemories = [],
+    deviceContext,
   } = req.body;
 
   if (!message || typeof message !== 'string') {
@@ -691,12 +802,19 @@ app.post('/api/chat', chatLimiter, async (req: Request, res: Response) => {
 
   try {
     const cleanMessage = sanitizeContent(message);
-    const systemInstruction = buildSystemInstruction(fastMode, preferredLanguage);
+    const resolvedMode: 'concise' | 'detailed' = responseMode === 'detailed' || !fastMode ? 'detailed' : 'concise';
+    const systemInstruction = buildSystemInstruction(
+      fastMode,
+      preferredLanguage,
+      resolvedMode,
+      Array.isArray(userMemories) ? userMemories : [],
+      deviceContext
+    );
 
-    const historySlice = fastMode ? history.slice(-4) : history.slice(-8);
+    const historySlice = resolvedMode === 'concise' ? history.slice(-6) : history.slice(-12);
     const contents: any[] = [];
     for (const msg of historySlice) {
-      if (msg && typeof msg.content === 'string') {
+      if (msg && typeof msg.content === 'string' && (msg.role === 'user' || msg.role === 'assistant')) {
         contents.push({
           role: msg.role === 'assistant' ? 'model' : 'user',
           parts: [{ text: sanitizeContent(msg.content.slice(0, 1500)) }],
@@ -1065,7 +1183,7 @@ app.get('/api/health', (req: Request, res: Response) => {
     targetPlatform: 'Android SDK 36 (Java 21 / Gradle 8.11.1)',
     uptimeSeconds: Math.floor(process.uptime()),
     geminiConfigured: Boolean(apiKey),
-    activeModel: 'gemini-3.8-flash',
+    activeModel: 'gemini-4-hydrogen',
     memoryRssMb: Math.round(memUsage.rss / (1024 * 1024)),
     worldModelEntries: personalWorldModel.length,
     auditLogsCount: veronicaAuditLogs.length,
@@ -1180,7 +1298,7 @@ Do NOT claim autonomous code execution.`;
 
 // 14. SURYA Vision Advanced Visual Perception & Bounding Box Detection
 app.post('/api/vision/analyze', visionLimiter, async (req: Request, res: Response) => {
-  const { imageBase64, mode = 'general' } = req.body;
+  const { imageBase64, mode = 'general', targetLanguage = 'English' } = req.body;
 
   if (!imageBase64 || typeof imageBase64 !== 'string') {
     return res.status(400).json({ error: 'Valid image base64 data is required for optical telemetry.' });
@@ -1194,26 +1312,37 @@ app.post('/api/vision/analyze', visionLimiter, async (req: Request, res: Respons
   try {
     const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
 
-    const prompt = `You are SURYA Vision, an advanced Iron Man / Stark-inspired computer vision perception system.
+    const modeDirectives: Record<string, string> = {
+      general: 'Perform full scene understanding, object identification, OCR extraction, and contextual advisory.',
+      ocr: `Prioritize exact text extraction (OCR) across all scripts, and translate extracted text cleanly into ${sanitizeContent(String(targetLanguage))}.`,
+      translate: `Extract every visible text block, signage, label, or document line and provide an accurate translation into ${sanitizeContent(String(targetLanguage))}.`,
+      document: 'Analyze as a structured document scanner: extract key fields, headings, totals, dates, action items, and readable text.',
+      qr: 'Detect any QR codes, barcodes, URLs, product labels, or machine-readable tags visible in the image and summarize their contents.',
+    };
+
+    const prompt = `You are SURYA Vision, an advanced peaceful multimodal computer vision perception system.
+Active Mode: ${sanitizeContent(String(mode))} — ${modeDirectives[String(mode)] || modeDirectives.general}
 Analyze this image frame and output a strictly valid JSON object matching this schema:
 {
-  "summary": "1-2 sentence tactical summary of the visual field",
+  "summary": "1-2 sentence concise summary of the visual field",
   "entities": [
     {
       "id": "e_1",
-      "label": "Name of object / landmark / component / plant",
-      "category": "Electronics | Machinery | Plant | Architecture | Text | Tool | Other",
-      "description": "Tactical breakdown and function of this object",
+      "label": "Name of object / landmark / component / document",
+      "category": "Electronics | Machinery | Plant | Architecture | Text | Document | QR | Tool | Other",
+      "description": "Concise functional breakdown of this object",
       "confidence": 0.95,
       "estimatedDistance": "1.2m (Estimated Proximity)",
       "box": { "ymin": 20, "xmin": 30, "ymax": 65, "xmax": 75 }
     }
   ],
   "ocrText": "Any visible printed or handwritten text, or empty string",
-  "ocrTranslation": "Translation of any visible non-English or regional text into English, or empty string",
-  "hudAdvisory": "Tactical contextual advisory note"
+  "ocrTranslation": "Translation of any visible text into ${sanitizeContent(String(targetLanguage))}, or empty string",
+  "qrPayloads": ["Decoded QR/barcode strings or URLs if visible, otherwise empty array"],
+  "documentFields": [{ "label": "Key", "value": "Extracted Value" }],
+  "hudAdvisory": "Helpful contextual advisory note"
 }
-Ensure all coordinates are percentages (0 to 100). Keep tracking strictly peaceful, non-weaponized, and educational.`;
+Ensure all box coordinates are percentages (0 to 100). Keep all analysis strictly peaceful, safe, educational, and non-weaponized.`;
 
     const response = await ai.models.generateContent({
       model: 'gemini-3.8-flash',
@@ -1628,9 +1757,9 @@ if (generatedAppsCatalog.length === 0) {
   <main class="p-4 grid grid-cols-1 md:grid-cols-3 gap-4" id="videoGrid"></main>
   <script>
     const videos = [
-      { id: 1, title: 'Exploring Quantum Telemetry with SURYA AI', channel: 'Solar Labs', views: '240K', time: '2 days ago', thumb: 'https://picsum.photos/seed/surya1/400/225' },
-      { id: 2, title: 'Building Native Android Apps with Java 21', channel: 'CodeStark', views: '110K', time: '1 week ago', thumb: 'https://picsum.photos/seed/surya2/400/225' },
-      { id: 3, title: 'Iron Man HUD: Holographic Optics Architecture', channel: 'CyberOptics', views: '890K', time: '3 weeks ago', thumb: 'https://picsum.photos/seed/surya3/400/225' }
+      { id: 1, title: 'Exploring Quantum Telemetry with SURYA AI', channel: 'Solar Labs', views: '240K', time: '2 days ago' },
+      { id: 2, title: 'Building Native Android Apps with Java 21', channel: 'CodeStark', views: '110K', time: '1 week ago' },
+      { id: 3, title: 'Holographic Optics Architecture Walkthrough', channel: 'CyberOptics', views: '890K', time: '3 weeks ago' }
     ];
     function render() {
       const grid = document.getElementById('videoGrid');
@@ -1697,14 +1826,14 @@ function persistApps() {
   } catch (e) {}
 }
 
-app.get('/api/apps', (req: Request, res: Response) => {
+app.get('/api/studio/apps', (req: Request, res: Response) => {
   return res.json({ apps: generatedAppsCatalog, count: generatedAppsCatalog.length });
 });
 
-app.get('/api/apps/:id', (req: Request, res: Response) => {
-  const app = generatedAppsCatalog.find((a) => a.id === req.params.id);
-  if (!app) return res.status(404).json({ error: 'Generated app not found' });
-  return res.json({ app });
+app.get('/api/studio/apps/:id', (req: Request, res: Response) => {
+  const foundApp = generatedAppsCatalog.find((a) => a.id === req.params.id);
+  if (!foundApp) return res.status(404).json({ error: 'Generated app not found' });
+  return res.json({ app: foundApp });
 });
 
 app.post('/api/apps/generate', async (req: Request, res: Response) => {
@@ -1836,6 +1965,189 @@ app.delete('/api/apps/:id', (req: Request, res: Response) => {
   return res.json({ success: true, remaining: generatedAppsCatalog.length });
 });
 
+// 19. SURYA Studio AI Debugger & Error Analyzer
+app.post('/api/apps/debug', async (req: Request, res: Response) => {
+  const { html = '', errorLog = '', description = '' } = req.body;
+  if (!html || typeof html !== 'string') {
+    return res.status(400).json({ error: 'Application HTML source is required for debugging.' });
+  }
+
+  const ai = getGeminiClient();
+  if (!ai) {
+    return res.status(503).json({ error: 'Gemini AI service unavailable for code debugging.' });
+  }
+
+  try {
+    const debugPrompt = `You are SURYA Studio Code Debugger. Analyze this sandboxed HTML/JS application and runtime error log.
+Runtime Error / Issue: ${sanitizeContent(String(errorLog || description || 'General inspection requested'))}
+Source Code:
+${html.slice(0, 8000)}
+
+Return JSON with:
+{
+  "diagnosis": "Concise root cause explanation",
+  "fixes": ["List of 1-3 concrete fixes applied"],
+  "patchedHtml": "Complete corrected standalone HTML document"
+}`;
+
+    const response = await generateWithFallback(ai, {
+      model: 'gemini-4-hydrogen',
+      contents: debugPrompt,
+      config: { responseMimeType: 'application/json' },
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    return res.json({
+      success: true,
+      diagnosis: sanitizeContent(parsed.diagnosis || 'Diagnostics complete.'),
+      fixes: Array.isArray(parsed.fixes) ? parsed.fixes.map((f: string) => sanitizeContent(f)) : [],
+      patchedHtml: typeof parsed.patchedHtml === 'string' && parsed.patchedHtml.trim().length > 40 ? parsed.patchedHtml : html,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Debug analysis failed.' });
+  }
+});
+
+// 20. SURYA Studio Public GitHub Repository Inspector
+app.get('/api/studio/github', async (req: Request, res: Response) => {
+  const repo = typeof req.query.repo === 'string' ? req.query.repo.trim() : 'hcgamer0205/SURYA-AI-Assistant';
+  if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo)) {
+    return res.status(400).json({ error: 'Invalid GitHub repository format. Use owner/repo.' });
+  }
+
+  try {
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github.v3+json',
+      'User-Agent': 'SURYA-AI-Studio',
+    };
+    const [repoRes, commitsRes, runsRes] = await Promise.all([
+      fetch(`https://api.github.com/repos/${repo}`, { headers }),
+      fetch(`https://api.github.com/repos/${repo}/commits?per_page=5`, { headers }),
+      fetch(`https://api.github.com/repos/${repo}/actions/runs?per_page=3`, { headers }),
+    ]);
+
+    if (!repoRes.ok) {
+      return res.status(repoRes.status).json({ error: `GitHub API returned status ${repoRes.status}` });
+    }
+
+    const repoData = await repoRes.json();
+    const commitsData = commitsRes.ok ? await commitsRes.json() : [];
+    const runsData = runsRes.ok ? await runsRes.json() : { workflow_runs: [] };
+
+    return res.json({
+      fullName: repoData.full_name,
+      description: repoData.description,
+      defaultBranch: repoData.default_branch,
+      stars: repoData.stargazers_count,
+      updatedAt: repoData.updated_at,
+      htmlUrl: repoData.html_url,
+      recentCommits: Array.isArray(commitsData)
+        ? commitsData.slice(0, 5).map((c: any) => ({
+            sha: c.sha?.slice(0, 7),
+            message: c.commit?.message?.split('\n')[0],
+            author: c.commit?.author?.name,
+            date: c.commit?.author?.date,
+          }))
+        : [],
+      recentBuilds: Array.isArray(runsData?.workflow_runs)
+        ? runsData.workflow_runs.slice(0, 3).map((r: any) => ({
+            id: r.id,
+            runNumber: r.run_number,
+            name: r.name,
+            status: r.status,
+            conclusion: r.conclusion,
+            htmlUrl: r.html_url,
+          }))
+        : [],
+    });
+  } catch (err: any) {
+    return res.status(502).json({ error: err?.message || 'Unable to reach GitHub API.' });
+  }
+});
+
+// 21. Multi-Agent Orchestration & Goal Decomposition Endpoint
+app.post('/api/agents/orchestrate', chatLimiter, async (req: Request, res: Response) => {
+  const { goal, userContext = '' } = req.body;
+  if (!goal || typeof goal !== 'string') {
+    return res.status(400).json({ error: 'Goal prompt is required.' });
+  }
+
+  const ai = getGeminiClient();
+  if (!ai) {
+    return res.status(503).json({ error: 'Gemini service unavailable for AI planning.' });
+  }
+
+  try {
+    const orchestrationPrompt = `You are SURYA Multi-Agent Orchestrator. Decompose the user goal into 3-5 verifiable execution steps.
+Available specialized agents:
+- agent_conversation (Core Conversation)
+- agent_context (Context & Personalization)
+- agent_planning (Planning)
+- agent_productivity (Productivity: creates tasks, notes, reminders, automations)
+- agent_vision (Vision: camera OCR, object analysis)
+- agent_research (Research: knowledge synthesis)
+- agent_coding (Coding: SURYA Studio sandboxed app generation)
+- agent_knowledge (Knowledge: Personal World Model & Vault queries)
+- agent_diagnostics (Diagnostics: system health & telemetry)
+- agent_verification (Verification: must be final step auditing outcomes)
+
+User Goal: "${sanitizeContent(goal)}"
+User Context: "${sanitizeContent(String(userContext).slice(0, 1000))}"
+
+Return valid JSON matching:
+{
+  "intent": "question|command|action_request|creation_request|modify_request|remember_request|conversation",
+  "summary": "1-sentence synthesis of what will be executed",
+  "subtasks": [
+    {
+      "order": 1,
+      "title": "Actionable step description",
+      "agent": "agent_planning",
+      "actionType": "none|create_task|create_note|add_memory|health_check|vault_query|studio_scaffold|verify",
+      "actionPayload": "optional payload text",
+      "requiresApproval": false
+    }
+  ]
+}`;
+
+    const response = await generateWithFallback(ai, {
+      model: 'gemini-4-hydrogen',
+      contents: orchestrationPrompt,
+      config: { responseMimeType: 'application/json' },
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    return res.json({
+      success: true,
+      plan: parsed,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Orchestration synthesis error.' });
+  }
+});
+
+// 22. Security Posture Report
+app.get('/api/security/report', (req: Request, res: Response) => {
+  return res.json({
+    serverCredentialsIsolated: true,
+    geminiKeyConfigured: Boolean(process.env.GEMINI_API_KEY),
+    corsPolicy: 'restricted_allowlist',
+    rateLimitingActive: true,
+    veronicaChallengeCount: veronicaChallenges.size,
+    auditLogCount: veronicaAuditLogs.length,
+    sensitiveDataRedactionActive: true,
+    noCovertRecordingGuarantee: true,
+    sandboxedStudioIsolation: true,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Ensure unhandled API routes return JSON 404 instead of HTML SPA fallback
+app.all('/api/*', (req: Request, res: Response) => {
+  res.status(404).json({ error: `API endpoint not found: ${req.method} ${req.path}` });
+});
+
 // Vite middleware mounting in development
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
@@ -1843,6 +2155,13 @@ async function startServer() {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
+    });
+    // Ensure unmatched /api/* routes return JSON 404 and never pass to Vite HTML fallback
+    app.use((req: Request, res: Response, next: NextFunction) => {
+      if (req.path.startsWith('/api/')) {
+        return res.status(404).json({ error: `API endpoint not found: ${req.method} ${req.path}` });
+      }
+      next();
     });
     app.use(vite.middlewares);
   } else {

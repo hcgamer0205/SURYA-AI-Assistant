@@ -14,6 +14,11 @@
 :root {
   font-family: 'Outfit', 'Noto Sans Devanagari', 'Noto Sans Arabic', 'Plus Jakarta Sans', system-ui, sans-serif;
   color-scheme: dark;
+  font-size: calc(16px * var(--surya-font-multiplier, 1));
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
 }
 
 /* Mobile Safe Areas */
@@ -26,7 +31,7 @@
 
 /* Futuristic Scanline & Grid Effect */
 .bg-cyber-grid {
-  background-image: 
+  background-image:
     linear-gradient(rgba(0, 240, 255, 0.03) 1px, transparent 1px),
     linear-gradient(90deg, rgba(0, 240, 255, 0.03) 1px, transparent 1px);
   background-size: 24px 24px;
@@ -91,6 +96,37 @@
 
 .animate-scan-line {
   animation: scan-line 4s linear infinite;
+}
+
+/* Reduced Motion Accessibility Support */
+[data-surya-reduced-motion="true"] *,
+[data-surya-reduced-motion="true"] *::before,
+[data-surya-reduced-motion="true"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* High Contrast Accessibility Enhancement */
+[data-surya-high-contrast="true"] {
+  --color-surya-border: rgba(251, 191, 36, 0.7);
+}
+
+/* Hide scrollbars on horizontal chips */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
 
 /* Custom Scrollbar */

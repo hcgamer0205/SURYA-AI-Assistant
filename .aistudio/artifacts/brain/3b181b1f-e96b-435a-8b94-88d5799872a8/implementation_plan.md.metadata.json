@@ -1,5 +1,0 @@
-{
-  "summary":  "SURYA Mobile AI Assistant Master Architecture & Delivery Report documenting the resolution of missing npm lockfile failure in GitHub Actions. Generated consistent package-lock.json, updated workflow install step with --legacy-peer-deps, validated npm ci, all 8 automated tests passed, and compilation/linting verified with 0 errors.",
-  "updatedAt":  "2026-11-09T09:05:28.789349634Z",
-  "userFacing":  true
-}

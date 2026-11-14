@@ -1,8 +1,8 @@
 /**
  * SURYA Local Android Intent Command Router
  * Executes device application commands locally with 0ms network latency.
- * Completely bypasses Gemini AI for native actions (e.g. YouTube, Chrome, Maps, Settings)
- * to eliminate "model on high demand" failures for local device actions.
+ * Never opens unexpected browser popups in embedded iframes; dispatches
+ * AndroidSuryaBridge intents natively or emits clean in-app fallback events.
  */
 
 export interface LocalCommandResult {
@@ -17,9 +17,6 @@ export interface LocalCommandResult {
 }
 
 export class LocalIntentRouter {
-  /**
-   * Evaluates text command against local intent catalog across English, Hindi, Hinglish, etc.
-   */
   public static matchLocalCommand(input: string, currentLanguage = 'en'): LocalCommandResult {
     if (!input || typeof input !== 'string') {
       return { isLocal: false };
@@ -31,15 +28,13 @@ export class LocalIntentRouter {
       .replace(/[?!.,;:'"\/\\-]/g, ' ')
       .replace(/\s+/g, ' ');
 
-    // Normalize command (strip assistant invocation "surya", "hey surya", "please", "kripya", "zara")
     const stripped = clean
       .replace(/^(hey|hi|hello|ok|okay)?\s*(surya|soorya|surya ai)\s*/i, '')
       .replace(/\s*(please|zara|kripya)\s*/gi, ' ')
       .trim();
 
-    // 1. YOUTUBE INTENT MATCHING (English, Hindi, Hinglish, Bengali, Tamil, etc.)
-    // Patterns: "open youtube", "launch youtube", "play youtube", "youtube kholo", "यूट्यूब खोलो", "youtube chalao"
-    const youtubeRegex = /(open\s+youtube|launch\s+youtube|play\s+youtube|start\s+youtube|youtube\s+kholo|youtube\s+chalao|youtube\s+open|यूट्यूब\s*खोलो|यूट्यूब\s*चलाओ|यूट्यूब\s*शुरू|ইউটিউব\s*খুলুন|யூடியூப்\s*திற|యూట్యూబ్\s*ఓపెన్|abrir\s+youtube|ouvrir\s+youtube)/i;
+    const youtubeRegex =
+      /(open\s+youtube|launch\s+youtube|play\s+youtube|start\s+youtube|youtube\s+kholo|youtube\s+chalao|youtube\s+open|यूट्यूब\s*खोलो|यूट्यूब\s*चलाओ|यूट्यूब\s*शुरू|ইউটিউব\s*খুলুন|யூடியூப்\s*திற|యూట్యూబ్\s*ఓపెన్|abrir\s+youtube|ouvrir\s+youtube)/i;
 
     if (youtubeRegex.test(stripped) || stripped === 'youtube' || stripped === 'यूट्यूब') {
       return {
@@ -61,8 +56,8 @@ export class LocalIntentRouter {
       };
     }
 
-    // 2. CHROME / WEB BROWSER
-    const browserRegex = /(open\s+(chrome|browser|internet|web)|launch\s+(chrome|browser)|chrome\s+kholo|browser\s+kholo|ब्राउज़र\s*खोलो|इंटरनेट\s*खोलो|ब्राउजर\s*खोलो|क्रोम\s*खोलो)/i;
+    const browserRegex =
+      /(open\s+(chrome|browser|internet|web)|launch\s+(chrome|browser)|chrome\s+kholo|browser\s+kholo|ब्राउज़र\s*खोलो|इंटरनेट\s*खोलो|ब्राउजर\s*खोलो|क्रोम\s*खोलो)/i;
     if (browserRegex.test(stripped) || stripped === 'chrome' || stripped === 'browser') {
       return {
         isLocal: true,
@@ -72,13 +67,12 @@ export class LocalIntentRouter {
         intentAction: 'android.intent.action.VIEW',
         intentUri: 'https://www.google.com',
         fallbackUrl: 'https://www.google.com',
-        responseMessage:
-          currentLanguage === 'hi' ? 'वेब ब्राउज़र खोला जा रहा है...' : 'Launching Web Browser...',
+        responseMessage: currentLanguage === 'hi' ? 'वेब ब्राउज़र खोला जा रहा है...' : 'Launching Web Browser...',
       };
     }
 
-    // 3. MAPS & GPS NAVIGATION
-    const mapsRegex = /(open\s+maps?|launch\s+maps?|google\s+maps?|navigate|directions|maps?\s+kholo|मैप\s*खोलो|नक्शा\s*खोलो|रास्ता\s*दिखाओ|नेविगेशन\s*खोलो)/i;
+    const mapsRegex =
+      /(open\s+maps?|launch\s+maps?|google\s+maps?|navigate|directions|maps?\s+kholo|मैप\s*खोलो|नक्शा\s*खोलो|रास्ता\s*दिखाओ|नेविगेशन\s*खोलो)/i;
     if (mapsRegex.test(stripped) || stripped === 'maps' || stripped === 'map') {
       return {
         isLocal: true,
@@ -88,13 +82,12 @@ export class LocalIntentRouter {
         intentAction: 'android.intent.action.VIEW',
         intentUri: 'geo:0,0?q=',
         fallbackUrl: 'https://maps.google.com',
-        responseMessage:
-          currentLanguage === 'hi' ? 'गूगल मैप्स खोला जा रहा है...' : 'Launching Google Maps...',
+        responseMessage: currentLanguage === 'hi' ? 'गूगल मैप्स खोला जा रहा है...' : 'Launching Google Maps...',
       };
     }
 
-    // 4. CAMERA
-    const cameraRegex = /(open\s+camera|launch\s+camera|take\s+(a\s+)?picture|take\s+(a\s+)?photo|camera\s+kholo|फोटो\s*खींचो|कैमरा\s*खोलो|कैमरा\s*शुरू)/i;
+    const cameraRegex =
+      /(open\s+camera|launch\s+camera|take\s+(a\s+)?picture|take\s+(a\s+)?photo|camera\s+kholo|फोटो\s*खींचो|कैमरा\s*खोलो|कैमरा\s*शुरू)/i;
     if (cameraRegex.test(stripped) || stripped === 'camera') {
       return {
         isLocal: true,
@@ -103,12 +96,10 @@ export class LocalIntentRouter {
         packageName: 'com.android.camera',
         intentAction: 'android.media.action.IMAGE_CAPTURE',
         intentUri: '',
-        responseMessage:
-          currentLanguage === 'hi' ? 'कैमरा खोला जा रहा है...' : 'Activating Optical Camera...',
+        responseMessage: currentLanguage === 'hi' ? 'कैमरा खोला जा रहा है...' : 'Activating Optical Camera...',
       };
     }
 
-    // 5. SETTINGS
     const settingsRegex = /(open\s+settings?|launch\s+settings?|device\s+settings?|settings?\s+kholo|सेटिंग्स\s*खोलो|सेटिंग\s*खोलो)/i;
     if (settingsRegex.test(stripped) || stripped === 'settings') {
       return {
@@ -118,12 +109,10 @@ export class LocalIntentRouter {
         packageName: 'com.android.settings',
         intentAction: 'android.settings.SETTINGS',
         intentUri: '',
-        responseMessage:
-          currentLanguage === 'hi' ? 'डिवाइस सेटिंग्स खोली जा रही हैं...' : 'Opening Android Settings...',
+        responseMessage: currentLanguage === 'hi' ? 'डिवाइस सेटिंग्स खोली जा रही हैं...' : 'Opening Android Settings...',
       };
     }
 
-    // 6. PHONE DIALER
     const dialerRegex = /(open\s+(dialer|phone)|call\s+someone|phone\s+kholo|dialer\s+kholo|फोन\s*खोलो|डायल\s*खोलो|कॉल\s*खोलो)/i;
     if (dialerRegex.test(stripped) || stripped === 'phone' || stripped === 'dialer') {
       return {
@@ -133,12 +122,10 @@ export class LocalIntentRouter {
         packageName: 'com.android.dialer',
         intentAction: 'android.intent.action.DIAL',
         intentUri: 'tel:',
-        responseMessage:
-          currentLanguage === 'hi' ? 'फोन डायलर खोला जा रहा है...' : 'Opening Phone Dialer...',
+        responseMessage: currentLanguage === 'hi' ? 'फोन डायलर खोला जा रहा है...' : 'Opening Phone Dialer...',
       };
     }
 
-    // 7. WI-FI SETTINGS
     const wifiRegex = /(wifi\s+settings?|open\s+wifi|wi-fi\s+settings?|wifi\s+kholo|वाईफाई\s*खोलो)/i;
     if (wifiRegex.test(stripped) || stripped === 'wifi') {
       return {
@@ -148,12 +135,10 @@ export class LocalIntentRouter {
         packageName: 'com.android.settings',
         intentAction: 'android.settings.WIFI_SETTINGS',
         intentUri: '',
-        responseMessage:
-          currentLanguage === 'hi' ? 'वाईफाई सेटिंग्स खोली जा रही हैं...' : 'Opening Wi-Fi Settings...',
+        responseMessage: currentLanguage === 'hi' ? 'वाईफाई सेटिंग्स खोली जा रही हैं...' : 'Opening Wi-Fi Settings...',
       };
     }
 
-    // 8. WHATSAPP
     const whatsappRegex = /(open\s+whatsapp|launch\s+whatsapp|whatsapp\s+kholo|व्हाट्सएप\s*खोलो|वॉट्सऐप\s*खोलो)/i;
     if (whatsappRegex.test(stripped) || stripped === 'whatsapp') {
       return {
@@ -164,24 +149,18 @@ export class LocalIntentRouter {
         intentAction: 'android.intent.action.VIEW',
         intentUri: 'whatsapp://',
         fallbackUrl: 'https://web.whatsapp.com',
-        responseMessage:
-          currentLanguage === 'hi' ? 'व्हाट्सएप खोला जा रहा है...' : 'Launching WhatsApp...',
+        responseMessage: currentLanguage === 'hi' ? 'व्हाट्सएप खोला जा रहा है...' : 'Launching WhatsApp...',
       };
     }
 
     return { isLocal: false };
   }
 
-  /**
-   * Dispatches the local Android command.
-   * Tries native Android bridge first, falls back to URL or web link.
-   */
   public static async executeLocalCommand(command: LocalCommandResult): Promise<{ success: boolean; detail: string }> {
     if (!command.isLocal) {
       return { success: false, detail: 'Not a local command' };
     }
 
-    // Try Native Android bridge
     const nativeBridge = typeof window !== 'undefined' ? (window as any).AndroidSuryaBridge : null;
     if (nativeBridge && typeof nativeBridge.launchIntent === 'function') {
       try {
@@ -194,23 +173,25 @@ export class LocalIntentRouter {
           return { success: true, detail: `Native intent dispatched for ${command.appName}` };
         }
       } catch (err) {
-        console.warn('Native intent failed, trying web fallback:', err);
+        console.warn('Native intent failed:', err);
       }
     }
 
-    // Web Fallback (e.g. in browser preview or if app not installed)
-    if (command.fallbackUrl) {
-      try {
-        window.open(command.fallbackUrl, '_blank');
-        return { success: true, detail: `Opened ${command.appName} via web fallback URL: ${command.fallbackUrl}` };
-      } catch (e) {
-        return { success: false, detail: `Failed to open fallback URL for ${command.appName}` };
-      }
+    if (typeof window !== 'undefined' && command.fallbackUrl) {
+      window.dispatchEvent(
+        new CustomEvent('suryaExternalFallback', {
+          detail: { appName: command.appName, url: command.fallbackUrl },
+        })
+      );
+      return {
+        success: true,
+        detail: `Web fallback ready for ${command.appName}: ${command.fallbackUrl}`,
+      };
     }
 
     return {
       success: true,
-      detail: `Executed local action for ${command.appName}`,
+      detail: `Prepared local action for ${command.appName}`,
     };
   }
 }

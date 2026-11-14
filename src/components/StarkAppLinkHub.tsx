@@ -90,9 +90,15 @@ export const StarkAppLinkHub: React.FC<StarkAppLinkHubProps> = ({ onRequestVeron
         success: true,
       });
 
-      // If running on a browser/PWA, attempt to open link if web-compatible
       if (app.scheme && app.scheme.startsWith('https://')) {
-        window.open(app.scheme, '_blank');
+        window.dispatchEvent(
+          new CustomEvent('suryaExternalFallback', {
+            detail: {
+              message: `Web preview fallback available for ${app.name}:`,
+              url: app.scheme,
+            },
+          })
+        );
       }
 
       setTimeout(() => setLaunchStatus(null), 4000);

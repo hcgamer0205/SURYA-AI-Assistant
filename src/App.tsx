@@ -1,22 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Volume2,
   VolumeX,
   Shield,
-  Radio,
   FileCode,
   Database,
   Atom,
   Activity,
-  Layers,
-  Sparkles,
   Sliders,
-  Cpu,
   Mic,
-  Eye,
-  CheckSquare,
+  ExternalLink,
+  X,
 } from 'lucide-react';
-import { TabType, ChatMessage, StarkApp, StarkActionPlan } from './types/surya';
+import { TabType, ChatMessage, StarkApp, StarkActionPlan, ResponseMode } from './types/surya';
 import { HolographicCore } from './components/HolographicCore';
 import { VoiceVisualizer } from './components/VoiceVisualizer';
 import { StarkCommandCenter } from './components/StarkCommandCenter';
@@ -35,15 +31,26 @@ import { SystemHealthDashboard } from './components/SystemHealthDashboard';
 import { ScientificKnowledge } from './components/ScientificKnowledge';
 import { SelfImprovementReport } from './components/SelfImprovementReport';
 import { Navigation } from './components/Navigation';
+import { StartupSequence } from './components/StartupSequence';
 
 import { voiceService } from './services/voiceService';
 import { soundFx } from './services/soundFx';
 import { apiService } from './services/apiService';
 import { uiThemeEngine } from './services/uiThemeEngine';
 import { voiceProfileManager } from './services/voiceProfileManager';
-import { voiceCommandParser } from './services/voiceCommandParser';
 import { wakeWordService } from './services/wakeWordService';
+import { deviceBridgeService } from './services/deviceBridgeService';
+import { suryaOrchestrator } from './services/suryaOrchestrator';
 import { SuryaThemeConfig } from './types/suryaTheme';
+
+const WELCOME_MESSAGE = (): ChatMessage => ({
+  id: 'init_1',
+  role: 'assistant',
+  content:
+    'SURYA intelligence systems synchronized. Android SDK 36 native bridge active. Suryadev — Radiant Command voice profile standing by.',
+  timestamp: new Date().toISOString(),
+  model: 'SURYA Command Core',
+});
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('core');
@@ -52,26 +59,38 @@ export default function App() {
   const [systemSubTab, setSystemSubTab] = useState<'health' | 'world' | 'science' | 'improve'>('health');
   const [currentTheme, setCurrentTheme] = useState<SuryaThemeConfig>(uiThemeEngine.getCurrentTheme());
   const [isPreviewActive, setIsPreviewActive] = useState<boolean>(uiThemeEngine.isPreviewActive());
-  const [activeModel, setActiveModel] = useState('gemini-3.8-flash');
+  const [activeModel, setActiveModel] = useState('gemini-4-hydrogen');
+  const [responseMode, setResponseMode] = useState<ResponseMode>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('surya_response_mode');
+      if (saved === 'detailed' || saved === 'concise') return saved;
+    }
+    return 'concise';
+  });
+  const [showStartup, setShowStartup] = useState<boolean>(
+    () => !uiThemeEngine.getCurrentTheme().accessibility.reducedMotion
+  );
 
   // Modals state
   const [showThemeModal, setShowThemeModal] = useState(false);
   const [showVoiceModal, setShowVoiceModal] = useState(false);
   const [showProductivityModal, setShowProductivityModal] = useState(false);
-  const [productivityInitialTab, setProductivityInitialTab] = useState<'tasks' | 'notes' | 'focus' | 'vault' | 'automations'>('tasks');
+  const [productivityInitialTab, setProductivityInitialTab] = useState<
+    'tasks' | 'notes' | 'focus' | 'vault' | 'automations'
+  >('tasks');
   const [showAgentModal, setShowAgentModal] = useState(false);
   const [showModelModal, setShowModelModal] = useState(false);
 
+  // Non-blocking toast banner (replaces alert / window.open)
+  const [appBanner, setAppBanner] = useState<{
+    message: string;
+    linkUrl?: string;
+    linkLabel?: string;
+    tone?: 'info' | 'warn';
+  } | null>(null);
+
   // Chat message thread
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 'init_1',
-      role: 'assistant',
-      content:
-        'SURYA intelligence systems synchronized. Android SDK 36 native bridge active. Suryadev — Radiant Command voice profile standing by.',
-      timestamp: new Date().toISOString(),
-    },
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>([WELCOME_MESSAGE()]);
   const [isProcessingChat, setIsProcessingChat] = useState(false);
 
   // Veronica Modal Interception State
@@ -80,7 +99,155 @@ export default function App() {
     onAuthorized: () => void;
   } | null>(null);
 
-  // Subscriptions to voice, theme, wake word
+  // Latest state refs for async voice/bridge callbacks
+  const soundMutedRef = useRef(soundMuted);
+  soundMutedRef.current = soundMuted;
+  const activeModelRef = useRef(activeModel);
+  activeModelRef.current = activeModel;
+  const responseModeRef = useRef(responseMode);
+  responseModeRef.current = responseMode;
+  const currentTabRef = useRef(currentTab);
+  currentTabRef.current = currentTab;
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const lastInputWasVoiceRef = useRef(false);
+
+  const handleChangeResponseMode = useCallback((mode: ResponseMode) => {
+    setResponseMode(mode);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('surya_response_mode', mode);
+    }
+  }, []);
+
+  const processInput = useCallback(async (rawText: string, fromVoice: boolean) => {
+    const trimmed = rawText.trim();
+    if (!trimmed) return;
+
+    lastInputWasVoiceRef.current = fromVoice;
+    soundFx.playClick();
+
+    const now = Date.now();
+    const userMsg: ChatMessage = {
+      id: `user_${now}`,
+      role: 'user',
+      content: trimmed,
+      timestamp: new Date().toISOString(),
+    };
+    const assistantId = `surya_${now + 1}`;
+    const placeholderMsg: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      timestamp: new Date().toISOString(),
+      model: activeModelRef.current,
+    };
+
+    const historySnapshot = [...messagesRef.current];
+    setMessages((prev) => [...prev, userMsg, placeholderMsg]);
+    setIsProcessingChat(true);
+
+    try {
+      const outcome = await suryaOrchestrator.handleInput(trimmed, {
+        activeTab: currentTabRef.current,
+        model: activeModelRef.current,
+        responseMode: responseModeRef.current,
+        language: voiceProfileManager.getSettings().language || 'auto',
+        history: historySnapshot,
+        onNavigateTab: (tab) => setCurrentTab(tab),
+        onStopSpeaking: () => {
+          lastInputWasVoiceRef.current = false;
+          voiceService.stopSpeaking();
+        },
+        onStreamChunk: (partialText) => {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === assistantId ? { ...m, content: partialText } : m))
+          );
+        },
+        onSpeak: (text) => {
+          if (!soundMutedRef.current && text.trim()) {
+            voiceService.speak(text, () => {
+              const ww = wakeWordService.getState();
+              if (
+                lastInputWasVoiceRef.current &&
+                ww.isActive &&
+                ww.continuousConversation &&
+                !voiceService.getState().isListening
+              ) {
+                lastInputWasVoiceRef.current = false;
+                voiceService.startListening((followUp) => {
+                  processInput(followUp, true);
+                });
+              }
+            });
+          }
+        },
+      });
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? {
+                ...m,
+                content: outcome.responseText || 'Operation completed.',
+                model: outcome.model,
+                ttftMs: outcome.ttftMs ?? outcome.latencyMs,
+              }
+            : m
+        )
+      );
+
+      if (outcome.handledLocally) {
+        soundFx.playAuthorize();
+      } else {
+        soundFx.playAuthorize();
+      }
+    } catch (err: any) {
+      soundFx.playAbort();
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? {
+                ...m,
+                role: 'system',
+                content: `SURYA Telemetry Alert: ${err?.message || 'Communication error.'}`,
+              }
+            : m
+        )
+      );
+    } finally {
+      setIsProcessingChat(false);
+    }
+  }, []);
+
+  const handleTranscript = useCallback(
+    (transcript: string) => {
+      processInput(transcript, true);
+    },
+    [processInput]
+  );
+
+  const handleSendMessage = useCallback(
+    (text: string) => {
+      processInput(text, false);
+    },
+    [processInput]
+  );
+
+  const handleSendQuickCommand = useCallback(
+    (text: string) => {
+      setCurrentTab('chat');
+      processInput(text, false);
+    },
+    [processInput]
+  );
+
+  const handleClearHistory = useCallback(() => {
+    soundFx.playClick();
+    voiceService.stopSpeaking();
+    setMessages([WELCOME_MESSAGE()]);
+  }, []);
+
+  // Subscriptions: voice, theme, wake-word, native Android deep actions, safe link fallback
   useEffect(() => {
     const unsubVoice = voiceService.subscribe((state) => {
       setVoiceState(state);
@@ -91,111 +258,45 @@ export default function App() {
       setIsPreviewActive(isPreview);
     });
 
-    // Register "Hey SURYA" Wake Word Trigger
-    wakeWordService.setOnWakeWord((keyword) => {
+    wakeWordService.setOnWakeWord((_keyword) => {
       soundFx.playAuthorize();
       voiceService.startListening((transcript) => {
-        handleTranscript(transcript);
+        processInput(transcript, true);
       });
     });
+
+    const unsubDeepAction = deviceBridgeService.onDeepAction((tab, action) => {
+      setCurrentTab(tab);
+      if (action === 'voice') {
+        voiceService.startListening((transcript) => {
+          processInput(transcript, true);
+        });
+      }
+    });
+
+    const handleExternalFallback = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail || {};
+      if (detail.message || detail.url) {
+        setAppBanner({
+          message: detail.message || 'Android native bridge unavailable in web preview.',
+          linkUrl: detail.url,
+          linkLabel: 'OPEN WEB FALLBACK',
+          tone: 'info',
+        });
+      }
+    };
+
+    window.addEventListener('suryaExternalFallback', handleExternalFallback);
 
     return () => {
       unsubVoice();
       unsubTheme();
+      unsubDeepAction();
+      window.removeEventListener('suryaExternalFallback', handleExternalFallback);
     };
-  }, []);
+  }, [processInput]);
 
-  // Handle voice transcript captured
-  const handleTranscript = async (transcript: string) => {
-    if (!transcript) return;
-    soundFx.playClick();
-
-    // 1. Intercept with local VoiceCommandParser
-    // Guaranteed instant execution for UI redesign, theme preview/apply/undo,
-    // voice profiles, language switches, stop speaking, and local Android apps!
-    const localAction = voiceCommandParser.parse(transcript);
-
-    if (localAction.handledLocally) {
-      // Add user command to messages thread
-      const userMsg: ChatMessage = {
-        id: `user_${Date.now()}`,
-        role: 'user',
-        content: transcript,
-        timestamp: new Date().toISOString(),
-      };
-
-      // Add local execution confirmation
-      const assistantMsg: ChatMessage = {
-        id: `surya_${Date.now()}`,
-        role: 'assistant',
-        content: localAction.spokenResponse || localAction.actionSummary || 'Action completed locally.',
-        timestamp: new Date().toISOString(),
-      };
-
-      setMessages((prev) => [...prev, userMsg, assistantMsg]);
-      soundFx.playAuthorize();
-
-      if (!soundMuted && localAction.spokenResponse) {
-        voiceService.speak(localAction.spokenResponse);
-      }
-      return;
-    }
-
-    // 2. Not a local action — dispatch to Gemini AI model
-    await handleSendMessage(transcript);
-  };
-
-  // Dispatch message to Gemini
-  const handleSendMessage = async (text: string) => {
-    const userMsg: ChatMessage = {
-      id: `user_${Date.now()}`,
-      role: 'user',
-      content: text,
-      timestamp: new Date().toISOString(),
-    };
-
-    setMessages((prev) => [...prev, userMsg]);
-    setIsProcessingChat(true);
-
-    const startTime = Date.now();
-
-    try {
-      const res = await apiService.sendChatMessage(text, messages);
-      const latency = Date.now() - startTime;
-
-      const assistantMsg: ChatMessage = {
-        id: `surya_${Date.now()}`,
-        role: 'assistant',
-        content: res.text,
-        timestamp: res.timestamp,
-        suggestedAction: res.suggestedAction,
-        ttftMs: latency,
-      };
-
-      setMessages((prev) => [...prev, assistantMsg]);
-      soundFx.playAuthorize();
-
-      // Read response aloud via speech synthesis if not muted
-      if (!soundMuted) {
-        voiceService.speak(res.text);
-      }
-    } catch (err: any) {
-      soundFx.playAbort();
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `err_${Date.now()}`,
-          role: 'system',
-          content: `SURYA Telemetry Alert: ${err.message || 'Communication error.'}`,
-          timestamp: new Date().toISOString(),
-        },
-      ]);
-    } finally {
-      setIsProcessingChat(false);
-    }
-  };
-
-  // Execute Action Plan
+  // Execute Action Plan with Veronica Guard
   const handleExecutePlan = (plan: StarkActionPlan) => {
     if (plan.riskLevel === 'HIGH') {
       const mockApp: StarkApp = {
@@ -221,13 +322,15 @@ export default function App() {
       return;
     }
 
-    // Direct dispatch
     apiService
       .launchStarkApp(plan.actionId, plan.param)
       .then(() => soundFx.playAuthorize())
       .catch((err) => {
         soundFx.playAbort();
-        alert(err.message);
+        setAppBanner({
+          message: `Action dispatch warning: ${err?.message || 'Unable to execute intent'}`,
+          tone: 'warn',
+        });
       });
   };
 
@@ -236,6 +339,7 @@ export default function App() {
     setSoundMuted(nextState);
     soundFx.setSoundEnabled(!nextState);
     if (nextState) {
+      lastInputWasVoiceRef.current = false;
       voiceService.stopSpeaking();
     }
   };
@@ -250,7 +354,11 @@ export default function App() {
         color: currentTheme.palette.textPrimary,
       }}
     >
-      {/* Top Bar (Wordmark, Status, Audio, Risk Badge) */}
+      {showStartup && (
+        <StartupSequence primaryColor={primaryCol} onComplete={() => setShowStartup(false)} />
+      )}
+
+      {/* Top Bar */}
       <header
         className="sticky top-0 z-30 flex items-center justify-between px-4 py-3 backdrop-blur-md border-b pt-safe"
         style={{
@@ -270,14 +378,11 @@ export default function App() {
           >
             SURYA AI
           </h1>
-          <span className="text-[10px] font-mono text-slate-400">
-            v2.4.0
-          </span>
+          <span className="text-[10px] font-mono text-slate-400">v2.5</span>
         </div>
 
         {/* Action Zone */}
         <div className="flex items-center gap-2">
-          {/* Quick Voice Settings Trigger */}
           <button
             onClick={() => {
               soundFx.playClick();
@@ -287,10 +392,11 @@ export default function App() {
             className="flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 text-[10px] font-mono hover:border-amber-400 transition-colors"
           >
             <Mic className="w-3 h-3 text-amber-400" />
-            <span className="truncate max-w-[75px]">{voiceProfileManager.getActiveProfile().name.split(' ')[0]}</span>
+            <span className="truncate max-w-[75px]">
+              {voiceProfileManager.getActiveProfile().name.split(' ')[0]}
+            </span>
           </button>
 
-          {/* Quick Theme Studio Trigger */}
           <button
             onClick={() => {
               soundFx.playClick();
@@ -302,22 +408,59 @@ export default function App() {
             <Sliders className="w-3.5 h-3.5" />
           </button>
 
-          {/* Veronica Protocol Badge */}
-          <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-950/80 border border-rose-500/40 text-[10px] font-mono text-rose-300">
+          <div className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-950/80 border border-rose-500/40 text-[10px] font-mono text-rose-300">
             <Shield className="w-3 h-3 text-rose-400" />
             <span>VERONICA ON</span>
           </div>
 
-          {/* Sound Mute Toggle */}
           <button
             onClick={toggleSound}
             aria-label={soundMuted ? 'Unmute sounds' : 'Mute sounds'}
             className="p-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:text-amber-300 transition-colors"
           >
-            {soundMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4 text-amber-400" />}
+            {soundMuted ? (
+              <VolumeX className="w-4 h-4" />
+            ) : (
+              <Volume2 className="w-4 h-4 text-amber-400" />
+            )}
           </button>
         </div>
       </header>
+
+      {/* Non-blocking System / Fallback Banner */}
+      {appBanner && (
+        <div
+          className={`mx-auto w-full max-w-2xl px-4 pt-2`}
+        >
+          <div
+            className={`px-3 py-2 rounded-xl border text-xs font-mono flex items-center justify-between gap-2 ${
+              appBanner.tone === 'warn'
+                ? 'bg-rose-950/70 border-rose-500/40 text-rose-200'
+                : 'bg-slate-900/90 border-cyan-500/40 text-cyan-200'
+            }`}
+          >
+            <span className="flex-1">{appBanner.message}</span>
+            {appBanner.linkUrl && (
+              <a
+                href={appBanner.linkUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-2.5 py-1 rounded-lg bg-cyan-500 text-slate-950 font-bold text-[10px] flex items-center gap-1 shrink-0"
+              >
+                <ExternalLink className="w-3 h-3" />
+                <span>{appBanner.linkLabel || 'OPEN'}</span>
+              </a>
+            )}
+            <button
+              onClick={() => setAppBanner(null)}
+              aria-label="Dismiss notification"
+              className="p-1 text-slate-400 hover:text-white"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Live Spoken Theme Preview Notification Banner */}
       {isPreviewActive && (
@@ -329,10 +472,9 @@ export default function App() {
 
       {/* Main View Area */}
       <main className="flex-1 overflow-y-auto">
-        {/* TAB 1: CORE (JARVIS Command Center + Solar Core & Voice) */}
+        {/* TAB 1: CORE (Unified Stark Command Center + Solar Core & Voice) */}
         {currentTab === 'core' && (
           <div className="flex flex-col items-center">
-            {/* Holographic Solar Coronal Core */}
             <HolographicCore
               isListening={voiceState.isListening}
               isSpeaking={voiceState.isSpeaking}
@@ -343,17 +485,21 @@ export default function App() {
               onCoreTap={() => {
                 if (voiceState.isListening) {
                   voiceService.stopListening();
+                } else if (voiceState.isSpeaking) {
+                  voiceService.interruptAndListen(handleTranscript);
                 } else {
                   voiceService.startListening(handleTranscript);
                 }
               }}
             />
 
-            {/* Voice Visualizer Waveform */}
             <VoiceVisualizer onTranscriptCaptured={handleTranscript} />
 
-            {/* Full Personal Command Center Dashboard */}
             <SuryaCommandCenter
+              activeModel={activeModel}
+              responseMode={responseMode}
+              onChangeResponseMode={handleChangeResponseMode}
+              onSendQuickCommand={handleSendQuickCommand}
               onNavigateTab={(tab) => setCurrentTab(tab)}
               onOpenVoiceModal={() => setShowVoiceModal(true)}
               onOpenThemeModal={() => setShowThemeModal(true)}
@@ -367,38 +513,45 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 2: CHAT (SURYA Tactical Real-Time Chat) */}
+        {/* TAB 2: CHAT (SURYA Tactical Real-Time Streaming Chat) */}
         {currentTab === 'chat' && (
           <StarkCommandCenter
             messages={messages}
             onSendMessage={handleSendMessage}
+            onVoiceCapture={handleTranscript}
+            onClearHistory={handleClearHistory}
             onExecutePlan={handleExecutePlan}
             isProcessing={isProcessingChat}
             activeModel={activeModel}
+            responseMode={responseMode}
+            onChangeResponseMode={handleChangeResponseMode}
             onOpenModelModal={() => setShowModelModal(true)}
+            onOpenTelemetry={() => {
+              setCurrentTab('system');
+              setSystemSubTab('health');
+            }}
           />
         )}
 
         {/* TAB 3: OPTICS (SURYA Vision AR Camera HUD) */}
         {currentTab === 'optics' && <SuryaVisionHUD />}
 
-        {/* TAB 4: PRODUCTIVITY (Tasks, Notes, Focus, Knowledge Vault, Automations) */}
+        {/* TAB 4: PRODUCTIVITY (Agenda, Tasks, Notes, Focus, Vault, Automations) */}
         {currentTab === 'productivity' && (
-          <div className="p-4">
+          <div className="p-4 pb-24">
             <PersonalProductivityModal
               onClose={() => setCurrentTab('core')}
-              initialTab="tasks"
+              initialTab={productivityInitialTab}
             />
           </div>
         )}
 
-        {/* TAB 5: STUDIO (App Creator Workspace & Extensibility) */}
+        {/* TAB 5: STUDIO (App Creator Workspace & GitHub Monitor) */}
         {currentTab === 'studio' && <AppCreatorWorkspace />}
 
         {/* TAB 6: SYSTEM (Health Diagnostics, World Model Memory, Science, Self-Improvement) */}
         {currentTab === 'system' && (
-          <div className="space-y-3 pb-20">
-            {/* Sub-navigation Segmented Control */}
+          <div className="space-y-3 pb-24">
             <div className="max-w-2xl mx-auto px-4 pt-2">
               <div className="flex items-center gap-1 p-1 bg-slate-900 rounded-xl border border-slate-800">
                 <button
@@ -460,7 +613,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Sub-tab view switch */}
             {systemSubTab === 'health' && <SystemHealthDashboard />}
             {systemSubTab === 'world' && <WorldModelDashboard />}
             {systemSubTab === 'science' && <ScientificKnowledge />}

@@ -11,25 +11,75 @@ import {
   FileCheck,
   RefreshCw,
   Zap,
+  Server,
+  Lock,
+  Smartphone,
 } from 'lucide-react';
-import { SystemHealthData, UpdateInfo } from '../types/surya';
+import { SystemHealthData, UpdateInfo, DeviceTelemetry } from '../types/surya';
 import { apiService } from '../services/apiService';
+import { deviceBridgeService } from '../services/deviceBridgeService';
 import { soundFx } from '../services/soundFx';
+
+interface SecurityReportData {
+  serverCredentialsIsolated: boolean;
+  geminiKeyConfigured: boolean;
+  corsPolicy: string;
+  rateLimitingActive: boolean;
+  veronicaChallengeCount: number;
+  auditLogCount: number;
+  sensitiveDataRedactionActive: boolean;
+  noCovertRecordingGuarantee: boolean;
+  sandboxedStudioIsolation: boolean;
+  timestamp: string;
+}
 
 export const SystemHealthDashboard: React.FC = () => {
   const [health, setHealth] = useState<SystemHealthData | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [securityReport, setSecurityReport] = useState<SecurityReportData | null>(null);
+  const [telemetry, setTelemetry] = useState<DeviceTelemetry>(deviceBridgeService.getTelemetry());
   const [isPingingGemini, setIsPingingGemini] = useState(false);
   const [geminiPingResult, setGeminiPingResult] = useState<{
     latencyMs: number;
     response: string;
   } | null>(null);
-  const [installProgress, setInstallProgress] = useState<string | null>(null);
+  const [installStatus, setInstallStatus] = useState<{ text: string; type: 'info' | 'ok' | 'err' } | null>(null);
+  const [permissionNote, setPermissionNote] = useState<string | null>(null);
+  const [backendUrl, setBackendUrl] = useState<string>(() => apiService.getApiBaseUrl());
+  const [isSavingUrl, setIsSavingUrl] = useState(false);
+  const [urlStatus, setUrlStatus] = useState<string | null>(null);
 
   useEffect(() => {
+    loadAllDiagnostics();
+    const unsub = deviceBridgeService.subscribe(setTelemetry);
+    return unsub;
+  }, []);
+
+  const loadAllDiagnostics = () => {
     loadHealth();
     checkUpdates();
-  }, []);
+    loadSecurityReport();
+    deviceBridgeService.refreshTelemetry();
+  };
+
+  const handleSaveBackendUrl = async () => {
+    soundFx.playClick();
+    apiService.setApiBaseUrl(backendUrl);
+    setIsSavingUrl(true);
+    setUrlStatus('Verifying backend connectivity...');
+    try {
+      const data = await apiService.getSystemHealth();
+      setHealth(data);
+      await loadSecurityReport();
+      soundFx.playAuthorize();
+      setUrlStatus(`Connected to backend (${data.status}). Model: ${data.activeModel}`);
+    } catch (err: any) {
+      soundFx.playAbort();
+      setUrlStatus(`Connection warning: ${err.message}`);
+    } finally {
+      setIsSavingUrl(false);
+    }
+  };
 
   const loadHealth = async () => {
     try {
@@ -46,6 +96,15 @@ export const SystemHealthDashboard: React.FC = () => {
       setUpdateInfo(info);
     } catch (e) {
       console.warn('Update check failed:', e);
+    }
+  };
+
+  const loadSecurityReport = async () => {
+    try {
+      const rep = await apiService.getSecurityReport();
+      setSecurityReport(rep);
+    } catch (e) {
+      console.warn('Security report fetch failed:', e);
     }
   };
 
@@ -71,20 +130,43 @@ export const SystemHealthDashboard: React.FC = () => {
     }
   };
 
-  const handleSimulateUpdate = () => {
+  const handleVerifyUpdateChecksum = async () => {
+    if (!updateInfo) return;
     soundFx.playClick();
-    setInstallProgress('Verifying SHA-256 package checksum...');
-    setTimeout(() => {
-      setInstallProgress('Checksum match: 9e2b83ef... Verified.');
-      setTimeout(() => {
-        setInstallProgress('Handing APK over to Android Package Installer via FileProvider...');
+    setInstallStatus({ text: 'Cryptographically verifying SHA-256 package digest...', type: 'info' });
+    try {
+      const result = await apiService.verifyApkChecksum(updateInfo.sha256Checksum, updateInfo.latestVersion);
+      if (result.valid) {
         soundFx.playAuthorize();
-        setTimeout(() => {
-          setInstallProgress(null);
-          alert('Update verified and dispatched to Android Package Installer.');
-        }, 1500);
-      }, 1000);
-    }, 1200);
+        setInstallStatus({
+          text: `${result.status} Download signed release from GitHub Actions artifacts to install v${updateInfo.latestVersion} on Android.`,
+          type: 'ok',
+        });
+      } else {
+        soundFx.playAbort();
+        setInstallStatus({
+          text: `Checksum validation failed: ${result.status}. Package rejected by Veronica Guard.`,
+          type: 'err',
+        });
+      }
+    } catch (err: any) {
+      soundFx.playAbort();
+      setInstallStatus({
+        text: `Verification request failed: ${err?.message || 'Unknown error'}`,
+        type: 'err',
+      });
+    }
+  };
+
+  const handleRequestPermissions = () => {
+    soundFx.playClick();
+    const sent = deviceBridgeService.requestNativePermissions();
+    if (sent) {
+      soundFx.playAuthorize();
+      setPermissionNote('Android runtime permission dialog triggered for Microphone, Camera, and Notifications.');
+    } else {
+      setPermissionNote('Running in web mode — browser grants Mic/Camera individually when prompted by Optics or Voice.');
+    }
   };
 
   return (
@@ -100,8 +182,7 @@ export const SystemHealthDashboard: React.FC = () => {
         <button
           onClick={() => {
             soundFx.playClick();
-            loadHealth();
-            checkUpdates();
+            loadAllDiagnostics();
           }}
           className="p-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-400 hover:text-slate-200"
           title="Refresh Telemetry"
@@ -111,19 +192,19 @@ export const SystemHealthDashboard: React.FC = () => {
       </div>
 
       {/* Grid of Diagnostics Cards */}
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-2 gap-3 tabular-nums">
         {/* Core Status */}
         <div className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 flex flex-col justify-between">
           <div className="flex items-center justify-between text-slate-400 mb-2">
             <span className="text-[10px] font-mono uppercase">AI CORE ENGINE</span>
             <Cpu className="w-4 h-4 text-cyan-400" />
           </div>
-          <div className="text-sm font-mono font-bold text-slate-100">
-            {health?.activeModel || 'gemini-3.8-flash'}
+          <div className="text-sm font-mono font-bold text-slate-100 truncate">
+            {health?.activeModel || 'gemini-4-hydrogen'}
           </div>
           <div className="flex items-center gap-1.5 mt-2 text-[10px] font-mono text-emerald-400">
             <CheckCircle className="w-3 h-3" />
-            <span>ONLINE & READY</span>
+            <span>{health ? 'ONLINE & READY' : 'CONNECTING...'}</span>
           </div>
         </div>
 
@@ -134,7 +215,7 @@ export const SystemHealthDashboard: React.FC = () => {
             <Zap className="w-4 h-4 text-amber-400" />
           </div>
           <div className="text-sm font-mono font-bold text-slate-100">
-            Android SDK 36
+            {telemetry.platform === 'android' ? `Android ${telemetry.deviceModel || 'SDK 36'}` : 'Web / SDK 36'}
           </div>
           <div className="text-[10px] font-mono text-slate-400 mt-2">
             Java 21 · Gradle 8.11.1
@@ -166,9 +247,118 @@ export const SystemHealthDashboard: React.FC = () => {
             Risk Tiered Bus
           </div>
           <div className="text-[10px] font-mono text-slate-400 mt-2">
-            3s Auto Abort Active
+            {securityReport ? `${securityReport.auditLogCount} Audit Events` : '3s Auto Abort Active'}
           </div>
         </div>
+      </div>
+
+      {/* Security & Privacy Posture Card */}
+      <div className="p-4 rounded-xl bg-slate-900 border border-emerald-500/30 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Lock className="w-4 h-4 text-emerald-400" />
+            <span className="text-xs font-mono font-bold text-emerald-300 uppercase">
+              SECURITY & PRIVACY POSTURE
+            </span>
+          </div>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-950/70 text-emerald-400 border border-emerald-500/40">
+            {securityReport?.serverCredentialsIsolated ? 'SERVER-ISOLATED' : 'CHECKING'}
+          </span>
+        </div>
+
+        {securityReport ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono">
+            <div className="p-2 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between">
+              <span className="text-slate-400">Gemini Credentials</span>
+              <span className={securityReport.geminiKeyConfigured ? 'text-emerald-400' : 'text-amber-400'}>
+                {securityReport.geminiKeyConfigured ? 'Server-Only OK' : 'Not Configured'}
+              </span>
+            </div>
+            <div className="p-2 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between">
+              <span className="text-slate-400">CORS Policy</span>
+              <span className="text-cyan-300">{securityReport.corsPolicy}</span>
+            </div>
+            <div className="p-2 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between">
+              <span className="text-slate-400">API Rate Limiting</span>
+              <span className="text-emerald-400">{securityReport.rateLimitingActive ? 'Active' : 'Off'}</span>
+            </div>
+            <div className="p-2 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between">
+              <span className="text-slate-400">Covert Recording</span>
+              <span className="text-emerald-400">
+                {securityReport.noCovertRecordingGuarantee ? 'Strictly Blocked' : 'Unknown'}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <p className="text-[11px] font-mono text-slate-400">
+            Fetching server security audit report...
+          </p>
+        )}
+
+        <div className="pt-1 flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-t border-slate-800">
+          <div className="text-[11px] font-mono text-slate-400 flex items-center gap-1.5">
+            <Smartphone className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+            <span>
+              Runtime Permissions · Battery:{' '}
+              {telemetry.batteryLevel !== null ? `${telemetry.batteryLevel}%` : 'N/A'} ·{' '}
+              {telemetry.online ? `Online (${telemetry.networkType})` : 'Offline'}
+            </span>
+          </div>
+          <button
+            onClick={handleRequestPermissions}
+            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] font-mono font-bold text-cyan-300 uppercase shrink-0"
+          >
+            CHECK PERMISSIONS
+          </button>
+        </div>
+        {permissionNote && (
+          <div className="p-2 rounded-lg bg-slate-950 border border-slate-800 text-[11px] font-mono text-cyan-300">
+            {permissionNote}
+          </div>
+        )}
+      </div>
+
+      {/* Backend Server Gateway Configuration */}
+      <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Server className="w-4 h-4 text-cyan-400" />
+            <span className="text-xs font-mono font-bold text-slate-200 uppercase">
+              BACKEND SERVER GATEWAY (MOBILE CONNECTIVITY)
+            </span>
+          </div>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-cyan-300 border border-slate-700">
+            {backendUrl ? 'REMOTE GATEWAY' : 'LOCAL / DEV PROXY'}
+          </span>
+        </div>
+
+        <p className="text-[11px] font-mono text-slate-400">
+          The Android APK uses this endpoint to communicate with the SURYA Gemini AI backend.
+        </p>
+
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={backendUrl}
+            onChange={(e) => setBackendUrl(e.target.value)}
+            placeholder="https://... or empty for local relative proxy"
+            className="flex-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs font-mono text-slate-100 placeholder-slate-600 focus:outline-none focus:border-cyan-500/50"
+          />
+          <button
+            onClick={handleSaveBackendUrl}
+            disabled={isSavingUrl}
+            className="px-3 py-2 bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/50 text-cyan-300 rounded-lg text-xs font-mono font-bold uppercase transition-all flex items-center gap-1.5"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isSavingUrl ? 'animate-spin' : ''}`} />
+            <span>SAVE & TEST</span>
+          </button>
+        </div>
+
+        {urlStatus && (
+          <div className="text-[11px] font-mono text-cyan-400 p-2 rounded bg-slate-950 border border-slate-800">
+            {urlStatus}
+          </div>
+        )}
       </div>
 
       {/* Gemini Live Latency Ping Test */}
@@ -188,7 +378,7 @@ export const SystemHealthDashboard: React.FC = () => {
         </div>
 
         {geminiPingResult ? (
-          <div className="mt-3 p-3 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono space-y-1">
+          <div className="mt-3 p-3 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono space-y-1 tabular-nums">
             <div className="flex items-center justify-between text-cyan-300 font-semibold">
               <span>ROUND-TRIP LATENCY:</span>
               <span>{geminiPingResult.latencyMs} ms</span>
@@ -209,16 +399,16 @@ export const SystemHealthDashboard: React.FC = () => {
             <div className="flex items-center gap-2">
               <Download className="w-4 h-4 text-cyan-400" />
               <span className="text-xs font-mono font-bold text-slate-200 uppercase">
-                SAFE AUTO-UPDATE SYSTEM
+                SAFE APK UPDATE VERIFIER
               </span>
             </div>
             <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-700/50">
-              v{updateInfo.latestVersion} AVAILABLE
+              v{updateInfo.latestVersion}
             </span>
           </div>
 
           <div className="text-xs text-slate-300 space-y-1 font-mono text-[11px]">
-            <p>Current: v{updateInfo.currentVersion} · Latest: v{updateInfo.latestVersion}</p>
+            <p>Current: v{updateInfo.currentVersion} · Target: v{updateInfo.latestVersion}</p>
             <p className="text-slate-400">{updateInfo.releaseNotes}</p>
             <div className="flex items-center gap-1 text-slate-400 text-[10px] truncate pt-1">
               <FileCheck className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
@@ -226,18 +416,31 @@ export const SystemHealthDashboard: React.FC = () => {
             </div>
           </div>
 
-          {installProgress && (
-            <div className="p-2.5 rounded-lg bg-cyan-950/60 border border-cyan-500/40 text-xs font-mono text-cyan-300 animate-pulse">
-              {installProgress}
+          {installStatus && (
+            <div
+              className={`p-2.5 rounded-lg border text-xs font-mono flex items-start gap-2 ${
+                installStatus.type === 'ok'
+                  ? 'bg-emerald-950/60 border-emerald-500/40 text-emerald-300'
+                  : installStatus.type === 'err'
+                  ? 'bg-rose-950/60 border-rose-500/40 text-rose-300'
+                  : 'bg-cyan-950/60 border-cyan-500/40 text-cyan-300'
+              }`}
+            >
+              {installStatus.type === 'err' ? (
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              ) : (
+                <CheckCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              )}
+              <span>{installStatus.text}</span>
             </div>
           )}
 
           <button
-            onClick={handleSimulateUpdate}
+            onClick={handleVerifyUpdateChecksum}
             className="w-full min-h-[44px] py-2 px-4 rounded-xl bg-cyan-500/20 border border-cyan-400 text-cyan-300 hover:bg-cyan-500/30 font-mono text-xs font-bold uppercase flex items-center justify-center gap-2 transition-all active:scale-98"
           >
             <Download className="w-4 h-4" />
-            <span>VERIFY CHECKSUM & DISPATCH UPDATE INTENT</span>
+            <span>VERIFY PACKAGE SHA-256 CHECKSUM</span>
           </button>
         </div>
       )}

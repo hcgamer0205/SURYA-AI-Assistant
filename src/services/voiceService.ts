@@ -1,7 +1,7 @@
 /**
  * SURYA Native Android & Web Voice Pipeline
  * Direct integration with AndroidSuryaBridge (SDK 36) and Web Speech API.
- * Powered by VoiceProfileManager ("Suryadev — Radiant Command") and interruptible speech.
+ * Supports true TTS completion callbacks, speech interruption, and endpointing.
  */
 
 import { voiceProfileManager } from './voiceProfileManager';
@@ -13,7 +13,7 @@ export interface VoiceState {
   error: string | null;
   supported: boolean;
   isNative: boolean;
-  audioLevel: number; // 0.0 to 1.0 for holographic visualizer
+  audioLevel: number;
 }
 
 type VoiceStateCallback = (state: VoiceState) => void;
@@ -33,11 +33,12 @@ class VoiceService {
   };
   private listeners: VoiceStateCallback[] = [];
   private onResultCallback: ((text: string) => void) | null = null;
+  private pendingNativeTtsDone: (() => void) | null = null;
+  private nativeTtsSafetyTimer: any = null;
   private audioLevelInterval: any = null;
 
   constructor() {
     if (typeof window !== 'undefined') {
-      // Check for native Android bridge
       const nativeBridge = (window as any).AndroidSuryaBridge;
       if (nativeBridge && typeof nativeBridge.startListening === 'function') {
         this.state.isNative = true;
@@ -50,6 +51,12 @@ class VoiceService {
           this.notify();
         });
 
+        window.addEventListener('onNativeSpeechEnd', () => {
+          this.state.isListening = false;
+          this.stopAudioSim();
+          this.notify();
+        });
+
         window.addEventListener('onNativeSpeechResult', (e: any) => {
           const detail = e.detail || {};
           const text = detail.text || '';
@@ -57,7 +64,9 @@ class VoiceService {
           this.notify();
 
           if (detail.isFinal && this.onResultCallback && text.trim()) {
+            this.state.isListening = false;
             this.stopAudioSim();
+            this.notify();
             this.onResultCallback(text.trim());
           }
         });
@@ -69,8 +78,23 @@ class VoiceService {
           this.state.error = `Android Speech Error (code: ${detail.code || 'UNKNOWN'})`;
           this.notify();
         });
+
+        window.addEventListener('onNativeTtsStart', () => {
+          this.state.isSpeaking = true;
+          this.startAudioSim();
+          this.notify();
+        });
+
+        window.addEventListener('onNativeTtsDone', () => {
+          clearTimeout(this.nativeTtsSafetyTimer);
+          this.state.isSpeaking = false;
+          this.stopAudioSim();
+          this.notify();
+          const cb = this.pendingNativeTtsDone;
+          this.pendingNativeTtsDone = null;
+          if (cb) cb();
+        });
       } else {
-        // Standard Web Speech API
         const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
         this.synth = window.speechSynthesis || null;
 
@@ -89,25 +113,29 @@ class VoiceService {
 
           this.recognition.onresult = (event: any) => {
             let currentTranscript = '';
+            let finalTranscript = '';
             for (let i = event.resultIndex; i < event.results.length; ++i) {
-              currentTranscript += event.results[i][0].transcript;
+              const seg = event.results[i][0].transcript;
+              currentTranscript += seg;
+              if (event.results[i].isFinal) {
+                finalTranscript += seg;
+              }
             }
             this.state.transcript = currentTranscript;
             this.notify();
 
-            if (event.results[0] && event.results[0].isFinal) {
-              const final = event.results[0][0].transcript.trim();
-              if (this.onResultCallback && final) {
-                this.stopAudioSim();
-                this.onResultCallback(final);
-              }
+            if (finalTranscript.trim() && this.onResultCallback) {
+              this.state.isListening = false;
+              this.stopAudioSim();
+              this.notify();
+              this.onResultCallback(finalTranscript.trim());
             }
           };
 
           this.recognition.onerror = (event: any) => {
             this.state.isListening = false;
             this.stopAudioSim();
-            if (event.error !== 'no-speech') {
+            if (event.error !== 'no-speech' && event.error !== 'aborted') {
               this.state.error = `Microphone: ${event.error}`;
             }
             this.notify();
@@ -128,7 +156,6 @@ class VoiceService {
   private startAudioSim() {
     this.stopAudioSim();
     this.audioLevelInterval = setInterval(() => {
-      // Simulate realistic speech RMS level between 0.2 and 0.85
       this.state.audioLevel = 0.2 + Math.random() * 0.65;
       this.notify();
     }, 80);
@@ -144,7 +171,7 @@ class VoiceService {
 
   public subscribe(callback: VoiceStateCallback): () => void {
     this.listeners.push(callback);
-    callback(this.state);
+    callback({ ...this.state });
     return () => {
       this.listeners = this.listeners.filter((cb) => cb !== callback);
     };
@@ -163,9 +190,8 @@ class VoiceService {
     this.state.error = null;
 
     const currentLang = voiceProfileManager.getSettings().language || 'en-IN';
-
-    // Native Android bridge check
     const nativeBridge = typeof window !== 'undefined' ? (window as any).AndroidSuryaBridge : null;
+
     if (nativeBridge && typeof nativeBridge.startListening === 'function') {
       try {
         nativeBridge.startListening(currentLang);
@@ -187,11 +213,11 @@ class VoiceService {
     try {
       this.recognition.lang = currentLang;
       this.recognition.start();
-    } catch (err: any) {
+    } catch {
       try {
         this.recognition.stop();
-        setTimeout(() => this.recognition.start(), 150);
-      } catch (retryErr) {
+        setTimeout(() => this.recognition.start(), 180);
+      } catch {
         this.state.error = 'Could not access microphone.';
         this.notify();
       }
@@ -203,26 +229,22 @@ class VoiceService {
     if (nativeBridge && typeof nativeBridge.stopListening === 'function') {
       try {
         nativeBridge.stopListening();
-      } catch (e) {}
+      } catch {}
     }
 
     if (this.recognition && this.state.isListening) {
       try {
         this.recognition.stop();
-      } catch (err) {}
+      } catch {}
     }
     this.stopAudioSim();
     this.state.isListening = false;
     this.notify();
   }
 
-  /**
-   * Speak response using "Suryadev — Radiant Command" parameters
-   */
   public speak(text: string, onEnd?: () => void) {
     this.stopSpeaking();
 
-    // Clean formatting and links
     const cleanText = text
       .replace(/[*_#`[\]()]/g, ' ')
       .replace(/https?:\/\/\S+/g, 'link')
@@ -235,25 +257,33 @@ class VoiceService {
     }
 
     const settings = voiceProfileManager.getSettings();
-
-    // Native Android TextToSpeech check
     const nativeBridge = typeof window !== 'undefined' ? (window as any).AndroidSuryaBridge : null;
+
     if (nativeBridge && typeof nativeBridge.speakText === 'function') {
       try {
-        nativeBridge.speakText(cleanText);
+        if (typeof nativeBridge.setVoiceLanguage === 'function') {
+          nativeBridge.setVoiceLanguage(settings.language);
+        }
+        this.pendingNativeTtsDone = onEnd || null;
         this.state.isSpeaking = true;
         this.startAudioSim();
         this.notify();
 
-        const durationMs = Math.min(18000, Math.max(1600, cleanText.split(' ').length * 280));
-        setTimeout(() => {
+        nativeBridge.speakText(cleanText);
+
+        // Safety timeout fallback in case UtteranceProgressListener is suppressed on an OEM ROM
+        const safetyMs = Math.min(24000, Math.max(3000, cleanText.split(' ').length * 420));
+        clearTimeout(this.nativeTtsSafetyTimer);
+        this.nativeTtsSafetyTimer = setTimeout(() => {
           if (this.state.isSpeaking) {
             this.state.isSpeaking = false;
             this.stopAudioSim();
             this.notify();
-            if (onEnd) onEnd();
+            const cb = this.pendingNativeTtsDone;
+            this.pendingNativeTtsDone = null;
+            if (cb) cb();
           }
-        }, durationMs);
+        }, safetyMs);
         return;
       } catch (e) {
         console.warn('Native TTS error, using Web Speech fallback:', e);
@@ -270,7 +300,6 @@ class VoiceService {
     utterance.pitch = settings.pitch;
     utterance.lang = settings.language;
 
-    // Pick best neural voice for selected language
     const voices = this.synth.getVoices();
     const langPrefix = settings.language.slice(0, 2);
 
@@ -314,11 +343,14 @@ class VoiceService {
   }
 
   public stopSpeaking() {
+    clearTimeout(this.nativeTtsSafetyTimer);
+    this.pendingNativeTtsDone = null;
+
     const nativeBridge = typeof window !== 'undefined' ? (window as any).AndroidSuryaBridge : null;
     if (nativeBridge && typeof nativeBridge.stopSpeaking === 'function') {
       try {
         nativeBridge.stopSpeaking();
-      } catch (e) {}
+      } catch {}
     }
 
     if (this.synth) {
@@ -328,6 +360,11 @@ class VoiceService {
     this.stopAudioSim();
     this.currentUtterance = null;
     this.notify();
+  }
+
+  public interruptAndListen(onResult: (text: string) => void) {
+    this.stopSpeaking();
+    this.startListening(onResult);
   }
 
   public getState(): VoiceState {

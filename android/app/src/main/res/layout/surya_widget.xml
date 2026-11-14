@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_bg"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:padding="12dp">
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/widget_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:letterSpacing="0.12"
+            android:text="SURYA AI"
+            android:textColor="#FBBF24"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/widget_subtitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="Tap for Voice, Optics or Command Center"
+            android:textColor="#94A3B8"
+            android:textSize="11sp" />
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/widget_btn_voice"
+        android:layout_width="wrap_content"
+        android:layout_height="36dp"
+        android:layout_marginEnd="6dp"
+        android:backgroundTint="#F59E0B"
+        android:minWidth="64dp"
+        android:text="VOICE"
+        android:textColor="#090D16"
+        android:textSize="11sp"
+        android:textStyle="bold" />
+
+    <Button
+        android:id="@+id/widget_btn_vision"
+        android:layout_width="wrap_content"
+        android:layout_height="36dp"
+        android:backgroundTint="#1E293B"
+        android:minWidth="64dp"
+        android:text="OPTICS"
+        android:textColor="#38BDF8"
+        android:textSize="11sp"
+        android:textStyle="bold" />
+
+</LinearLayout>

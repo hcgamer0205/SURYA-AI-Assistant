@@ -1,6 +1,7 @@
 export type TabType = 'core' | 'chat' | 'optics' | 'productivity' | 'studio' | 'system' | 'plugins' | 'hub' | 'security';
 
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH';
+export type ResponseMode = 'concise' | 'detailed';
 
 export interface ChatMessage {
   id: string;
@@ -57,6 +58,19 @@ export interface WorldModelMemory {
   updatedAt: string;
 }
 
+export interface DeviceTelemetry {
+  platform: 'android' | 'web';
+  batteryLevel: number | null;
+  isCharging: boolean | null;
+  online: boolean;
+  networkType: string;
+  bluetoothAudioConnected: boolean;
+  handsFreeServiceRunning: boolean;
+  sdkVersion?: number;
+  deviceModel?: string;
+  updatedAt: string;
+}
+
 export interface SystemHealthData {
   status: string;
   version: string;
@@ -93,6 +107,26 @@ export interface ScientificArticle {
   summary: string;
   principles: string[];
   telemetryFormula: string;
+}
+
+export interface VisionEntity {
+  id: string;
+  label: string;
+  category: string;
+  description: string;
+  confidence: number;
+  estimatedDistance: string;
+  box: { ymin: number; xmin: number; ymax: number; xmax: number };
+}
+
+export interface VisionAnalysisResult {
+  summary: string;
+  entities: VisionEntity[];
+  ocrText: string;
+  ocrTranslation: string;
+  qrPayloads?: string[];
+  documentFields?: { label: string; value: string }[];
+  hudAdvisory: string;
 }
 
 // ---------------- UNIVERSAL EXTENSIBILITY & PLUGIN TYPES ----------------
@@ -141,6 +175,14 @@ export interface AppFile {
   language: string;
 }
 
+export interface StudioVersionSnapshot {
+  id: string;
+  version: string;
+  note: string;
+  timestamp: string;
+  previewHtml: string;
+}
+
 export interface GeneratedApp {
   id: string;
   name: string;
@@ -153,6 +195,17 @@ export interface GeneratedApp {
   status: 'ready' | 'generating' | 'error';
   createdAt: string;
   lastModified: string;
+}
+
+export interface GithubRepoSummary {
+  fullName: string;
+  description: string;
+  defaultBranch: string;
+  stars: number;
+  updatedAt: string;
+  htmlUrl: string;
+  recentCommits: { sha: string; message: string; author: string; date: string }[];
+  recentBuilds: { id: number; runNumber: number; name: string; status: string; conclusion: string | null; htmlUrl: string }[];
 }
 
 export type ThemeColor = 'gold' | 'cyan' | 'emerald' | 'amber' | 'crimson' | 'purple';

@@ -12,16 +12,22 @@ import {
   Square,
   Search,
   X,
-  Volume2,
   Calendar,
+  Pause,
+  History,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   productivityService,
   TaskItem,
   NoteItem,
-  ReminderItem,
+  AgendaEvent,
+  AutomationWorkflow,
+  AutomationTriggerType,
+  AutomationHistoryEntry,
 } from '../services/productivityService';
 import { knowledgeVaultService, VaultDocument } from '../services/knowledgeVaultService';
+import { voiceService } from '../services/voiceService';
 import { soundFx } from '../services/soundFx';
 
 interface PersonalProductivityModalProps {
@@ -35,20 +41,18 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
 }) => {
   const [activeTab, setActiveTab] = useState<'tasks' | 'notes' | 'focus' | 'vault' | 'automations'>(initialTab);
 
-  // Task State
+  // Tasks & Agenda State
   const [tasks, setTasks] = useState<TaskItem[]>(productivityService.getTasks());
+  const [agenda, setAgenda] = useState<AgendaEvent[]>(productivityService.getAgenda());
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [newTaskPriority, setNewTaskPriority] = useState<TaskItem['priority']>('MEDIUM');
+  const [newEventTitle, setNewEventTitle] = useState('');
+  const [newEventTime, setNewEventTime] = useState('04:30 PM');
 
   // Notes State
   const [notes, setNotes] = useState<NoteItem[]>(productivityService.getNotes());
   const [newNoteTitle, setNewNoteTitle] = useState('');
   const [newNoteContent, setNewNoteContent] = useState('');
-
-  // Reminders State
-  const [reminders, setReminders] = useState<ReminderItem[]>(productivityService.getReminders());
-  const [newRemTitle, setNewRemTitle] = useState('');
-  const [newRemTime, setNewRemTime] = useState('18:00');
 
   // Focus Timer State
   const [focusSeconds, setFocusSeconds] = useState(25 * 60);
@@ -61,16 +65,30 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
   const [vaultQuestion, setVaultQuestion] = useState('');
   const [vaultAnswer, setVaultAnswer] = useState<{ answer: string; sources: string[] } | null>(null);
 
-  // Automations State
-  const [automations, setAutomations] = useState(productivityService.getAutomations());
+  // Stark Automation Engine State
+  const [automations, setAutomations] = useState<AutomationWorkflow[]>(productivityService.getAutomations());
+  const [autoHistory, setAutoHistory] = useState<AutomationHistoryEntry[]>(productivityService.getAutomationHistory());
+  const [autoName, setAutoName] = useState('');
+  const [autoTrigger, setAutoTrigger] = useState<AutomationTriggerType>('at_time');
+  const [autoActionTarget, setAutoActionTarget] = useState('');
+  const [autoRequireApproval, setAutoRequireApproval] = useState(true);
+  const [pendingApprovalId, setPendingApprovalId] = useState<string | null>(null);
+  const [autoStatusNote, setAutoStatusNote] = useState<string | null>(null);
 
-  // --- Task Handlers ---
   const handleAddTask = () => {
     if (!newTaskTitle.trim()) return;
     soundFx.playClick();
-    const created = productivityService.addTask(newTaskTitle.trim(), newTaskPriority);
+    productivityService.addTask(newTaskTitle.trim(), newTaskPriority);
     setTasks(productivityService.getTasks());
     setNewTaskTitle('');
+  };
+
+  const handleAddEvent = () => {
+    if (!newEventTitle.trim()) return;
+    soundFx.playClick();
+    productivityService.addAgendaEvent(newEventTitle.trim(), newEventTime, newEventTime);
+    setAgenda(productivityService.getAgenda());
+    setNewEventTitle('');
   };
 
   const handleToggleTask = (id: string) => {
@@ -85,7 +103,6 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
     setTasks(productivityService.getTasks());
   };
 
-  // --- Note Handlers ---
   const handleAddNote = () => {
     if (!newNoteTitle.trim() || !newNoteContent.trim()) return;
     soundFx.playClick();
@@ -101,7 +118,6 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
     setNotes(productivityService.getNotes());
   };
 
-  // --- Focus Timer Handlers ---
   const toggleFocusTimer = () => {
     if (isFocusRunning) {
       clearInterval(focusIntervalId);
@@ -131,7 +147,6 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
     setFocusSeconds(25 * 60);
   };
 
-  // --- Knowledge Vault Search & Grounded Q&A ---
   const handleVaultSearch = (q: string) => {
     setVaultSearch(q);
     setVaultDocs(knowledgeVaultService.searchDocuments(q));
@@ -140,8 +155,43 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
   const handleVaultQuery = () => {
     if (!vaultQuestion.trim()) return;
     soundFx.playAuthorize();
-    const res = knowledgeVaultService.queryKnowledge(vaultQuestion.trim());
-    setVaultAnswer(res);
+    setVaultAnswer(knowledgeVaultService.queryKnowledge(vaultQuestion.trim()));
+  };
+
+  const handleCreateAutomation = () => {
+    if (!autoName.trim() || !autoActionTarget.trim()) return;
+    soundFx.playAuthorize();
+    productivityService.addAutomation({
+      name: autoName.trim(),
+      trigger: autoTrigger,
+      actions: [{ type: 'send_notification', target: autoActionTarget.trim() }],
+      requiresApproval: autoRequireApproval,
+      isEnabled: true,
+      isPaused: false,
+    });
+    setAutomations(productivityService.getAutomations());
+    setAutoName('');
+    setAutoActionTarget('');
+    setAutoStatusNote('New Stark automation routine saved.');
+  };
+
+  const handleRunAutomation = async (id: string, approved = false) => {
+    soundFx.playClick();
+    const res = await productivityService.executeAutomation(id, {
+      approved,
+      onSpeak: (text) => voiceService.speak(text),
+    });
+    setAutoHistory(productivityService.getAutomationHistory());
+    setAutomations(productivityService.getAutomations());
+    setTasks(productivityService.getTasks());
+    if (res.status === 'awaiting_approval') {
+      setPendingApprovalId(id);
+      setAutoStatusNote(`Approval required before running "${res.automationName}".`);
+    } else {
+      setPendingApprovalId(null);
+      setAutoStatusNote(`${res.automationName}: ${res.status} — ${res.details}`);
+      if (res.status === 'completed') soundFx.playAuthorize();
+    }
   };
 
   return (
@@ -149,18 +199,17 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
       role="dialog"
       aria-modal="true"
       aria-label="Personal Productivity Suite"
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-slate-950/85 backdrop-blur-md animate-in fade-in"
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-slate-950/85 backdrop-blur-md"
     >
-      <div className="w-full max-w-xl max-h-[90vh] flex flex-col bg-slate-900 border border-amber-500/40 rounded-2xl shadow-2xl overflow-hidden font-sans">
-        {/* Header */}
+      <div className="w-full max-w-2xl max-h-[90vh] flex flex-col bg-slate-900 border border-amber-500/40 rounded-2xl shadow-2xl overflow-hidden font-sans">
         <div className="flex items-center justify-between px-4 py-3 bg-slate-950/80 border-b border-slate-800">
           <div className="flex items-center gap-2">
             <CheckSquare className="w-5 h-5 text-amber-400" />
             <div>
               <h2 className="text-sm font-mono font-bold text-amber-300 tracking-wider uppercase">
-                SURYA PRODUCTIVITY SUITE
+                PRODUCTIVITY, AGENDA &amp; STARK AUTOMATIONS
               </h2>
-              <p className="text-[10px] text-slate-400">Tasks, Notes, Focus Sessions, Knowledge Vault & Automations</p>
+              <p className="text-[10px] text-slate-400">Tasks, Calendar Agenda, Notes, Focus, Vault &amp; Routines</p>
             </div>
           </div>
           <button
@@ -170,18 +219,17 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
               onClose();
             }}
             aria-label="Close productivity modal"
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white bg-slate-800 transition-colors"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-white bg-slate-800"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Segmented Sub-Navigation */}
-        <div className="flex items-center gap-1 px-3 pt-2 bg-slate-950/40 border-b border-slate-800/80 overflow-x-auto">
+        <div className="flex items-center gap-1 px-3 pt-2 bg-slate-950/40 border-b border-slate-800/80 overflow-x-auto no-scrollbar">
           {[
-            { id: 'tasks', label: 'TASKS', icon: CheckSquare },
+            { id: 'tasks', label: 'TASKS & AGENDA', icon: CheckSquare },
             { id: 'notes', label: 'NOTES', icon: FileText },
-            { id: 'focus', label: 'FOCUS MODE', icon: Clock },
+            { id: 'focus', label: 'FOCUS', icon: Clock },
             { id: 'vault', label: 'VAULT', icon: BookOpen },
             { id: 'automations', label: 'AUTOMATIONS', icon: Zap },
           ].map((tab) => {
@@ -207,12 +255,47 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
           })}
         </div>
 
-        {/* Content Body */}
         <div className="flex-1 p-4 overflow-y-auto space-y-4">
-          {/* TAB 1: TASKS */}
           {activeTab === 'tasks' && (
-            <div className="space-y-3">
-              {/* Add Task input */}
+            <div className="space-y-4">
+              {/* Agenda Section */}
+              <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2">
+                <div className="flex items-center gap-1.5 text-xs font-mono font-bold text-cyan-300">
+                  <Calendar className="w-3.5 h-3.5" />
+                  <span>DAILY AGENDA</span>
+                </div>
+                <div className="space-y-1.5">
+                  {agenda.map((evt) => (
+                    <div key={evt.id} className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between text-xs">
+                      <span className="text-slate-200">{evt.title}</span>
+                      <span className="text-[10px] font-mono text-cyan-300 tabular-nums">{evt.startTime}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex gap-2 pt-1">
+                  <input
+                    type="text"
+                    value={newEventTitle}
+                    onChange={(e) => setNewEventTitle(e.target.value)}
+                    placeholder="Add agenda event..."
+                    className="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100"
+                  />
+                  <input
+                    type="text"
+                    value={newEventTime}
+                    onChange={(e) => setNewEventTime(e.target.value)}
+                    className="w-24 px-2 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs font-mono text-slate-100"
+                  />
+                  <button
+                    onClick={handleAddEvent}
+                    className="px-3 py-1.5 rounded-lg bg-cyan-500 text-slate-950 font-mono text-xs font-bold"
+                  >
+                    + EVENT
+                  </button>
+                </div>
+              </div>
+
+              {/* Add Task */}
               <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2">
                 <input
                   type="text"
@@ -243,7 +326,7 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
                   </div>
                   <button
                     onClick={handleAddTask}
-                    className="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-mono text-xs font-bold flex items-center gap-1 hover:bg-amber-400 transition-colors"
+                    className="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-mono text-xs font-bold flex items-center gap-1"
                   >
                     <Plus className="w-3.5 h-3.5" />
                     <span>ADD TASK</span>
@@ -251,62 +334,33 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
                 </div>
               </div>
 
-              {/* Task list */}
               <div className="space-y-2">
                 {tasks.map((t) => {
                   const isDone = t.status === 'completed';
                   return (
                     <div
                       key={t.id}
-                      className={`p-3 rounded-xl border flex items-center justify-between transition-all ${
-                        isDone
-                          ? 'bg-slate-950/40 border-slate-800 opacity-60'
-                          : 'bg-slate-800/80 border-slate-700'
+                      className={`p-3 rounded-xl border flex items-center justify-between ${
+                        isDone ? 'bg-slate-950/40 border-slate-800 opacity-60' : 'bg-slate-800/80 border-slate-700'
                       }`}
                     >
                       <div className="flex items-start gap-2.5">
                         <button
                           onClick={() => handleToggleTask(t.id)}
-                          className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 mt-0.5 transition-colors ${
-                            isDone
-                              ? 'bg-emerald-500 border-emerald-400 text-slate-950'
-                              : 'border-slate-600 hover:border-amber-400'
+                          className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 mt-0.5 ${
+                            isDone ? 'bg-emerald-500 border-emerald-400 text-slate-950' : 'border-slate-600'
                           }`}
                         >
                           {isDone && <Check className="w-3.5 h-3.5 stroke-[3]" />}
                         </button>
                         <div>
-                          <span
-                            className={`text-xs font-semibold block ${
-                              isDone ? 'line-through text-slate-400' : 'text-slate-100'
-                            }`}
-                          >
+                          <span className={`text-xs font-semibold block ${isDone ? 'line-through text-slate-400' : 'text-slate-100'}`}>
                             {t.title}
                           </span>
-                          <div className="flex items-center gap-2 mt-1">
-                            <span
-                              className={`text-[9px] font-mono px-1.5 py-0.2 rounded font-bold ${
-                                t.priority === 'CRITICAL'
-                                  ? 'bg-rose-950 text-rose-300 border border-rose-500/40'
-                                  : t.priority === 'HIGH'
-                                  ? 'bg-amber-950 text-amber-300 border border-amber-500/40'
-                                  : 'bg-slate-800 text-slate-400'
-                              }`}
-                            >
-                              {t.priority}
-                            </span>
-                            {t.tags.map((tag) => (
-                              <span key={tag} className="text-[9px] text-slate-400">
-                                #{tag}
-                              </span>
-                            ))}
-                          </div>
+                          <span className="text-[9px] font-mono text-amber-300">{t.priority}</span>
                         </div>
                       </div>
-                      <button
-                        onClick={() => handleDeleteTask(t.id)}
-                        className="p-1.5 text-slate-400 hover:text-rose-400 transition-colors"
-                      >
+                      <button onClick={() => handleDeleteTask(t.id)} className="p-1.5 text-slate-400 hover:text-rose-400">
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
@@ -316,95 +370,68 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
             </div>
           )}
 
-          {/* TAB 2: NOTES */}
           {activeTab === 'notes' && (
             <div className="space-y-3">
-              {/* Add Note box */}
               <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2">
                 <input
                   type="text"
                   value={newNoteTitle}
                   onChange={(e) => setNewNoteTitle(e.target.value)}
                   placeholder="Note Title..."
-                  className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-amber-400"
+                  className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100"
                 />
                 <textarea
                   value={newNoteContent}
                   onChange={(e) => setNewNoteContent(e.target.value)}
                   placeholder="Note content..."
                   rows={3}
-                  className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-amber-400"
+                  className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100"
                 />
                 <div className="flex justify-end">
                   <button
                     onClick={handleAddNote}
-                    className="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-mono text-xs font-bold hover:bg-amber-400 transition-colors"
+                    className="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-mono text-xs font-bold"
                   >
                     SAVE NOTE
                   </button>
                 </div>
               </div>
-
-              {/* Note cards */}
-              <div className="space-y-2">
-                {notes.map((n) => (
-                  <div key={n.id} className="p-3 rounded-xl bg-slate-800/80 border border-slate-700 space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-slate-100">{n.title}</span>
-                      <button
-                        onClick={() => handleDeleteNote(n.id)}
-                        className="p-1 text-slate-400 hover:text-rose-400"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                    <p className="text-[11px] text-slate-300 whitespace-pre-wrap leading-relaxed">
-                      {n.content}
-                    </p>
+              {notes.map((n) => (
+                <div key={n.id} className="p-3 rounded-xl bg-slate-800/80 border border-slate-700 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-100">{n.title}</span>
+                    <button onClick={() => handleDeleteNote(n.id)} className="p-1 text-slate-400 hover:text-rose-400">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                   </div>
-                ))}
-              </div>
+                  <p className="text-[11px] text-slate-300 whitespace-pre-wrap">{n.content}</p>
+                </div>
+              ))}
             </div>
           )}
 
-          {/* TAB 3: FOCUS MODE */}
           {activeTab === 'focus' && (
             <div className="flex flex-col items-center justify-center p-6 space-y-6 text-center">
-              <div>
-                <span className="text-xs font-mono font-bold text-amber-400 uppercase tracking-widest block mb-1">
-                  SOLAR FOCUS & STUDY SESSION
-                </span>
-                <p className="text-xs text-slate-400">
-                  Minimizes notifications, plays ambient solar binaural frequency, tracks study progress.
-                </p>
-              </div>
-
-              {/* Big Timer Display */}
-              <div className="w-44 h-44 rounded-full border-4 border-amber-500/40 flex flex-col items-center justify-center bg-slate-950/80 shadow-2xl shadow-amber-500/10">
-                <span className="text-3xl font-mono font-bold text-amber-300">
-                  {Math.floor(focusSeconds / 60)
-                    .toString()
-                    .padStart(2, '0')}
-                  :
+              <div className="w-44 h-44 rounded-full border-4 border-amber-500/40 flex flex-col items-center justify-center bg-slate-950/80">
+                <span className="text-3xl font-mono font-bold text-amber-300 tabular-nums">
+                  {Math.floor(focusSeconds / 60).toString().padStart(2, '0')}:
                   {(focusSeconds % 60).toString().padStart(2, '0')}
                 </span>
                 <span className="text-[10px] font-mono text-slate-400 mt-1 uppercase">
                   {isFocusRunning ? 'FLOW ACTIVE' : 'STANDBY'}
                 </span>
               </div>
-
-              {/* Controls */}
               <div className="flex items-center gap-3">
                 <button
                   onClick={toggleFocusTimer}
-                  className="px-6 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono text-xs font-bold flex items-center gap-2 shadow-lg transition-all active:scale-95"
+                  className="px-6 py-2.5 rounded-xl bg-amber-500 text-slate-950 font-mono text-xs font-bold flex items-center gap-2"
                 >
                   {isFocusRunning ? <Square className="w-4 h-4" /> : <Play className="w-4 h-4" />}
                   <span>{isFocusRunning ? 'PAUSE SESSION' : 'START FOCUS'}</span>
                 </button>
                 <button
                   onClick={resetFocusTimer}
-                  className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-xs font-bold transition-all active:scale-95"
+                  className="px-4 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-mono text-xs font-bold"
                 >
                   RESET
                 </button>
@@ -412,10 +439,8 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
             </div>
           )}
 
-          {/* TAB 4: KNOWLEDGE VAULT */}
           {activeTab === 'vault' && (
             <div className="space-y-4">
-              {/* Search bar */}
               <div className="relative">
                 <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
                 <input
@@ -423,14 +448,13 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
                   value={vaultSearch}
                   onChange={(e) => handleVaultSearch(e.target.value)}
                   placeholder="Search research vault, architecture docs, topics..."
-                  className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950/80 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-amber-400"
+                  className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950/80 border border-slate-700 text-xs text-slate-100"
                 />
               </div>
 
-              {/* Grounded Q&A Query box */}
               <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/30 space-y-2">
                 <span className="text-[11px] font-mono text-amber-300 font-bold block uppercase">
-                  Grounded Q&A over Personal Vault
+                  Grounded Q&amp;A over Personal Vault
                 </span>
                 <div className="flex gap-2">
                   <input
@@ -438,94 +462,191 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
                     value={vaultQuestion}
                     onChange={(e) => setVaultQuestion(e.target.value)}
                     placeholder="Ask a question about your saved docs..."
-                    className="flex-1 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-amber-400"
+                    className="flex-1 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100"
                   />
                   <button
                     onClick={handleVaultQuery}
-                    className="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-mono text-xs font-bold hover:bg-amber-400 transition-colors"
+                    className="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-mono text-xs font-bold"
                   >
                     ASK
                   </button>
                 </div>
                 {vaultAnswer && (
                   <div className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 text-xs text-slate-200 mt-2 space-y-1">
-                    <p className="leading-relaxed">{vaultAnswer.answer}</p>
-                    <div className="text-[9px] font-mono text-amber-400">
-                      Sources: {vaultAnswer.sources.join(', ')}
-                    </div>
+                    <p>{vaultAnswer.answer}</p>
+                    <div className="text-[9px] font-mono text-amber-400">Sources: {vaultAnswer.sources.join(', ')}</div>
                   </div>
                 )}
               </div>
 
-              {/* Docs list */}
-              <div className="space-y-2">
-                {vaultDocs.map((doc) => (
-                  <div key={doc.id} className="p-3 rounded-xl bg-slate-800/80 border border-slate-700 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-slate-100">{doc.title}</span>
-                      <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-slate-900 text-amber-400 border border-slate-700">
-                        {doc.topic}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-300 line-clamp-2 leading-relaxed">
-                      {doc.summary}
-                    </p>
-                    <div className="flex items-center gap-1.5 pt-1">
-                      {doc.tags.map((tag) => (
-                        <span key={tag} className="text-[9px] font-mono text-slate-400">
-                          #{tag}
-                        </span>
-                      ))}
-                    </div>
+              {vaultDocs.map((doc) => (
+                <div key={doc.id} className="p-3 rounded-xl bg-slate-800/80 border border-slate-700 space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-100">{doc.title}</span>
+                    <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-slate-900 text-amber-400">
+                      {doc.topic}
+                    </span>
                   </div>
-                ))}
-              </div>
+                  <p className="text-[11px] text-slate-300">{doc.summary}</p>
+                </div>
+              ))}
             </div>
           )}
 
-          {/* TAB 5: AUTOMATIONS */}
           {activeTab === 'automations' && (
-            <div className="space-y-3">
-              <span className="text-xs font-mono font-bold text-slate-300 block uppercase">
-                ACTIVE TRIGGER-ACTION AUTOMATIONS
-              </span>
+            <div className="space-y-4">
+              {/* New Automation Builder */}
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2">
+                <span className="text-xs font-mono font-bold text-amber-300 block uppercase">
+                  CREATE STARK AUTOMATION ROUTINE
+                </span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    value={autoName}
+                    onChange={(e) => setAutoName(e.target.value)}
+                    placeholder="Routine name (e.g. Evening Wrap-up)"
+                    className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100"
+                  />
+                  <select
+                    value={autoTrigger}
+                    onChange={(e) => setAutoTrigger(e.target.value as AutomationTriggerType)}
+                    className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs font-mono text-slate-100"
+                  >
+                    <option value="at_time">Time Trigger (Scheduled)</option>
+                    <option value="morning_greeting">Morning Briefing</option>
+                    <option value="study_start">Study Start</option>
+                    <option value="on_wake_word">Wake Word Event</option>
+                    <option value="battery_low">Low Battery Condition</option>
+                    <option value="offline_mode">Offline Network Event</option>
+                  </select>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    value={autoActionTarget}
+                    onChange={(e) => setAutoActionTarget(e.target.value)}
+                    placeholder="Action notification/task text..."
+                    className="flex-1 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100"
+                  />
+                  <label className="flex items-center gap-1.5 text-[11px] font-mono text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={autoRequireApproval}
+                      onChange={(e) => setAutoRequireApproval(e.target.checked)}
+                      className="accent-amber-500"
+                    />
+                    Require Approval
+                  </label>
+                  <button
+                    onClick={handleCreateAutomation}
+                    className="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-mono text-xs font-bold"
+                  >
+                    + CREATE
+                  </button>
+                </div>
+              </div>
+
+              {autoStatusNote && (
+                <div className="p-2.5 rounded-xl bg-amber-950/40 border border-amber-500/40 text-xs font-mono text-amber-200 flex items-center justify-between gap-2">
+                  <span>{autoStatusNote}</span>
+                  {pendingApprovalId && (
+                    <button
+                      onClick={() => handleRunAutomation(pendingApprovalId, true)}
+                      className="px-3 py-1 rounded-lg bg-amber-500 text-slate-950 font-bold text-[11px] flex items-center gap-1 shrink-0"
+                    >
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      <span>APPROVE &amp; RUN</span>
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Workflows */}
               <div className="space-y-2.5">
                 {automations.map((a) => (
                   <div
                     key={a.id}
-                    className="p-3.5 rounded-xl bg-slate-800/80 border border-slate-700 flex items-center justify-between"
+                    className="p-3.5 rounded-xl bg-slate-800/80 border border-slate-700 space-y-2"
                   >
-                    <div>
-                      <span className="text-xs font-bold text-slate-100 block mb-1">{a.name}</span>
-                      <span className="text-[10px] font-mono text-amber-400 block">
-                        Trigger: {a.trigger.replace('_', ' ')}
-                      </span>
-                      <p className="text-[10px] text-slate-400 mt-1">
-                        Actions: {a.actions.map((act) => `${act.type} (${act.target})`).join(' → ')}
-                      </p>
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <span className="text-xs font-bold text-slate-100 block">{a.name}</span>
+                        <span className="text-[10px] font-mono text-amber-400">
+                          Trigger: {a.trigger} {a.requiresApproval ? '· Approval Gate' : ''}
+                          {a.isPaused ? ' · PAUSED' : ''}
+                        </span>
+                        <p className="text-[10px] text-slate-400 mt-0.5">
+                          Steps: {a.actions.map((act) => `${act.type} (${act.target})`).join(' → ')}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => {
+                          productivityService.deleteAutomation(a.id);
+                          setAutomations(productivityService.getAutomations());
+                        }}
+                        className="p-1 text-slate-400 hover:text-rose-400"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </div>
-                    <button
-                      onClick={() => {
-                        soundFx.playClick();
-                        productivityService.toggleAutomation(a.id);
-                        setAutomations(productivityService.getAutomations());
-                      }}
-                      className={`px-3 py-1 rounded-lg text-xs font-mono font-bold transition-colors ${
-                        a.isEnabled
-                          ? 'bg-emerald-500 text-slate-950'
-                          : 'bg-slate-700 text-slate-400'
-                      }`}
-                    >
-                      {a.isEnabled ? 'ENABLED' : 'PAUSED'}
-                    </button>
+
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        onClick={() => handleRunAutomation(a.id)}
+                        className="px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 text-[10px] font-mono font-bold flex items-center gap-1"
+                      >
+                        <Play className="w-3 h-3" />
+                        <span>RUN</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          productivityService.pauseAutomation(a.id);
+                          setAutomations(productivityService.getAutomations());
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 text-[10px] font-mono font-bold flex items-center gap-1"
+                      >
+                        <Pause className="w-3 h-3" />
+                        <span>{a.isPaused ? 'RESUME' : 'PAUSE'}</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          productivityService.toggleAutomation(a.id);
+                          setAutomations(productivityService.getAutomations());
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold ${
+                          a.isEnabled ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'bg-slate-700 text-slate-400'
+                        }`}
+                      >
+                        {a.isEnabled ? 'ENABLED' : 'DISABLED'}
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
+
+              {/* Execution History */}
+              {autoHistory.length > 0 && (
+                <div className="space-y-1.5 pt-2 border-t border-slate-800">
+                  <div className="flex items-center gap-1.5 text-xs font-mono font-bold text-slate-300">
+                    <History className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>EXECUTION HISTORY</span>
+                  </div>
+                  {autoHistory.slice(0, 5).map((h) => (
+                    <div key={h.id} className="p-2 rounded-lg bg-slate-950/70 border border-slate-800 text-[11px] flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="font-bold text-slate-200">{h.automationName}</span>
+                        <span className="text-slate-400 block truncate">{h.details}</span>
+                      </div>
+                      <span className="text-[10px] font-mono text-amber-300 uppercase shrink-0">{h.status}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
 
-        {/* Footer */}
         <div className="px-4 py-3 bg-slate-950/90 border-t border-slate-800 flex justify-end">
           <button
             onClick={() => {
@@ -533,7 +654,7 @@ export const PersonalProductivityModal: React.FC<PersonalProductivityModalProps>
               if (focusIntervalId) clearInterval(focusIntervalId);
               onClose();
             }}
-            className="px-4 py-2 rounded-xl bg-amber-500 text-slate-950 font-mono text-xs font-bold hover:bg-amber-400 transition-colors"
+            className="px-4 py-2 rounded-xl bg-amber-500 text-slate-950 font-mono text-xs font-bold hover:bg-amber-400"
           >
             CLOSE
           </button>

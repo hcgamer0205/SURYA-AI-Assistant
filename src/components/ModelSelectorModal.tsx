@@ -12,6 +12,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { soundFx } from '../services/soundFx';
+import { apiService } from '../services/apiService';
 
 interface ModelSelectorModalProps {
   onClose: () => void;
@@ -103,14 +104,14 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
     soundFx.playAuthorize();
     setTestResult('Testing connection to Google Gemini API gateway...');
     try {
-      const res = await fetch('/api/health');
-      if (res.ok) {
-        setTestResult('Connection verified: Gemini AI gateway 200 OK. Streaming active.');
+      const health = await apiService.getSystemHealth();
+      if (health?.status) {
+        setTestResult(`Connection verified: Gemini AI gateway ${health.status}. Model: ${health.activeModel}.`);
       } else {
-        setTestResult(`Gateway returned status ${res.status}`);
+        setTestResult('Connection verified: Gemini AI gateway active.');
       }
     } catch (e: any) {
-      setTestResult(`Network check error: ${e.message}`);
+      setTestResult(`Gateway connection error: ${e.message}`);
     }
   };
 

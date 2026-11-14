@@ -1,64 +1,141 @@
 package com.surya.assistant;
 
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.PackageManager;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.Uri;
+import android.os.BatteryManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.content.Intent;
-import android.content.pm.PackageManager;
-import android.net.Uri;
-import android.os.Build;
-import android.webkit.JavascriptInterface;
-import android.webkit.WebView;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebView;
 import androidx.annotation.NonNull;
-import androidx.core.content.FileProvider;
-import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
 import androidx.biometric.BiometricManager;
 import androidx.biometric.BiometricPrompt;
+import androidx.core.app.ActivityCompat;
+import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
+import androidx.core.content.FileProvider;
+import com.getcapacitor.BridgeActivity;
 import java.io.File;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Executor;
-import com.getcapacitor.BridgeActivity;
+import org.json.JSONObject;
 
 /**
  * SURYA Mobile Assistant Native Android Bridge Activity (SDK 36, Java 21)
- * High-performance multilingual voice bridge, genuine BiometricPrompt authentication,
- * intent launcher, and secure FileProvider APK installation.
+ * High-performance multilingual voice bridge, Foreground Hands-Free service bridge,
+ * device telemetry, BiometricPrompt authentication, notifications, and deep actions.
  */
 public class MainActivity extends BridgeActivity {
 
+    private static final String ALERTS_CHANNEL_ID = "surya_alerts_channel";
     private TextToSpeech tts;
     private SpeechRecognizer speechRecognizer;
     private Handler mainHandler;
+    private BroadcastReceiver handsFreeStopReceiver;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         mainHandler = new Handler(Looper.getMainLooper());
+        createAlertsNotificationChannel();
 
-        // Initialize Android TextToSpeech with multilingual locale support
+        // Initialize Android TextToSpeech with completion callbacks
         tts = new TextToSpeech(this, status -> {
             if (status == TextToSpeech.SUCCESS) {
                 tts.setLanguage(Locale.getDefault());
                 tts.setPitch(1.0f);
-                tts.setSpeechRate(1.1f);
+                tts.setSpeechRate(1.06f);
+                tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                    @Override
+                    public void onStart(String utteranceId) {
+                        sendJsEvent("onNativeTtsStart", "{\"utteranceId\":" + JSONObject.quote(utteranceId) + "}");
+                    }
+
+                    @Override
+                    public void onDone(String utteranceId) {
+                        sendJsEvent("onNativeTtsDone", "{\"utteranceId\":" + JSONObject.quote(utteranceId) + "}");
+                    }
+
+                    @Override
+                    public void onError(String utteranceId) {
+                        sendJsEvent("onNativeTtsDone", "{\"utteranceId\":" + JSONObject.quote(utteranceId) + ",\"error\":true}");
+                    }
+                });
             }
         });
 
-        // Attach native JavascriptInterface to WebView
         WebView webView = getBridge().getWebView();
         if (webView != null) {
             webView.addJavascriptInterface(new AndroidSuryaNativeBridge(), "AndroidSuryaBridge");
+        }
+
+        handsFreeStopReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (speechRecognizer != null) {
+                    try {
+                        speechRecognizer.cancel();
+                    } catch (Exception ignored) {}
+                }
+                sendJsEvent("onHandsFreeServiceState", "{\"running\":false,\"stoppedByUserNotification\":true}");
+            }
+        };
+
+        IntentFilter filter = new IntentFilter(SuryaHandsFreeService.BROADCAST_HANDSFREE_STOPPED);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(handsFreeStopReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(handsFreeStopReceiver, filter);
+        }
+
+        handleDeepLinkIntent(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleDeepLinkIntent(intent);
+    }
+
+    private void handleDeepLinkIntent(Intent intent) {
+        if (intent == null || intent.getData() == null) return;
+        Uri data = intent.getData();
+        String action = data.getQueryParameter("action");
+        if (action != null && !action.isEmpty()) {
+            final String safeAction = JSONObject.quote(action);
+            mainHandler.postDelayed(() -> sendJsEvent("onSuryaDeepAction", "{\"action\":" + safeAction + "}"), 600);
         }
     }
 
     @Override
     public void onDestroy() {
+        if (handsFreeStopReceiver != null) {
+            try {
+                unregisterReceiver(handsFreeStopReceiver);
+            } catch (Exception ignored) {}
+        }
         if (tts != null) {
             tts.stop();
             tts.shutdown();
@@ -69,8 +146,23 @@ public class MainActivity extends BridgeActivity {
         super.onDestroy();
     }
 
+    private void createAlertsNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                ALERTS_CHANNEL_ID,
+                "SURYA Reminders & Alerts",
+                NotificationManager.IMPORTANCE_DEFAULT
+            );
+            channel.setDescription("Proactive reminders, automation updates, and device status notifications.");
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) {
+                manager.createNotificationChannel(channel);
+            }
+        }
+    }
+
     /**
-     * Native JavascriptInterface exposed to SURYA frontend
+     * Native JavascriptInterface exposed to SURYA frontend as window.AndroidSuryaBridge
      */
     public class AndroidSuryaNativeBridge {
 
@@ -84,9 +176,158 @@ public class MainActivity extends BridgeActivity {
             return Build.VERSION.SDK_INT;
         }
 
-        /**
-         * Set TextToSpeech Language Code (e.g. "hi-IN", "ta-IN", "ja-JP", "en-US")
-         */
+        @JavascriptInterface
+        public boolean isHandsFreeServiceRunning() {
+            return SuryaHandsFreeService.isRunning;
+        }
+
+        @JavascriptInterface
+        public boolean startHandsFreeForegroundService() {
+            if (ContextCompat.checkSelfPermission(MainActivity.this, android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                requestRuntimePermissions();
+                return false;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(MainActivity.this, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(
+                    MainActivity.this,
+                    new String[]{android.Manifest.permission.POST_NOTIFICATIONS},
+                    103
+                );
+            }
+            Intent serviceIntent = new Intent(MainActivity.this, SuryaHandsFreeService.class);
+            ContextCompat.startForegroundService(MainActivity.this, serviceIntent);
+            sendJsEvent("onHandsFreeServiceState", "{\"running\":true}");
+            return true;
+        }
+
+        @JavascriptInterface
+        public boolean stopHandsFreeForegroundService() {
+            Intent serviceIntent = new Intent(MainActivity.this, SuryaHandsFreeService.class);
+            stopService(serviceIntent);
+            SuryaHandsFreeService.isRunning = false;
+            sendJsEvent("onHandsFreeServiceState", "{\"running\":false}");
+            return true;
+        }
+
+        @JavascriptInterface
+        public void requestRuntimePermissions() {
+            mainHandler.post(() -> {
+                List<String> needed = new ArrayList<>();
+                if (ContextCompat.checkSelfPermission(MainActivity.this, android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    needed.add(android.Manifest.permission.RECORD_AUDIO);
+                }
+                if (ContextCompat.checkSelfPermission(MainActivity.this, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                    needed.add(android.Manifest.permission.CAMERA);
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    ContextCompat.checkSelfPermission(MainActivity.this, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                    needed.add(android.Manifest.permission.POST_NOTIFICATIONS);
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    ContextCompat.checkSelfPermission(MainActivity.this, android.Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                    needed.add(android.Manifest.permission.BLUETOOTH_CONNECT);
+                }
+                if (!needed.isEmpty()) {
+                    ActivityCompat.requestPermissions(MainActivity.this, needed.toArray(new String[0]), 102);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public String getDeviceTelemetry() {
+            try {
+                JSONObject json = new JSONObject();
+
+                // Battery
+                BatteryManager bm = (BatteryManager) getSystemService(Context.BATTERY_SERVICE);
+                int batteryPct = bm != null ? bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) : -1;
+                boolean charging = bm != null && bm.isCharging();
+                json.put("batteryLevel", batteryPct);
+                json.put("isCharging", charging);
+
+                // Connectivity
+                String networkType = "offline";
+                boolean isOnline = false;
+                ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null) {
+                    Network active = cm.getActiveNetwork();
+                    NetworkCapabilities caps = active != null ? cm.getNetworkCapabilities(active) : null;
+                    if (caps != null) {
+                        isOnline = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+                        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                            networkType = "wifi";
+                        } else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                            networkType = "cellular";
+                        } else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) {
+                            networkType = "ethernet";
+                        } else {
+                            networkType = "connected";
+                        }
+                    }
+                }
+                json.put("online", isOnline);
+                json.put("networkType", networkType);
+
+                // Bluetooth audio route check
+                boolean bluetoothAudio = false;
+                AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                if (am != null) {
+                    AudioDeviceInfo[] outputs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
+                    for (AudioDeviceInfo dev : outputs) {
+                        int type = dev.getType();
+                        if (type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                            type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                            type == AudioDeviceInfo.TYPE_BLE_HEADSET) {
+                            bluetoothAudio = true;
+                            break;
+                        }
+                    }
+                }
+                json.put("bluetoothAudioConnected", bluetoothAudio);
+                json.put("handsFreeServiceRunning", SuryaHandsFreeService.isRunning);
+                json.put("sdkVersion", Build.VERSION.SDK_INT);
+                json.put("deviceModel", Build.MANUFACTURER + " " + Build.MODEL);
+                return json.toString();
+            } catch (Exception e) {
+                return "{\"error\":\"telemetry_unavailable\"}";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean sendLocalNotification(String title, String body) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    ContextCompat.checkSelfPermission(MainActivity.this, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                    return false;
+                }
+                Intent intent = new Intent(MainActivity.this, MainActivity.class);
+                intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                PendingIntent pending = PendingIntent.getActivity(
+                    MainActivity.this,
+                    20,
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                );
+                NotificationCompat.Builder builder = new NotificationCompat.Builder(MainActivity.this, ALERTS_CHANNEL_ID)
+                    .setSmallIcon(R.mipmap.ic_launcher)
+                    .setContentTitle(title != null ? title : "SURYA Notification")
+                    .setContentText(body != null ? body : "")
+                    .setAutoCancel(true)
+                    .setContentIntent(pending)
+                    .setPriority(NotificationCompat.PRIORITY_DEFAULT);
+
+                NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                if (nm != null) {
+                    nm.notify((int) (System.currentTimeMillis() % 100000), builder.build());
+                    return true;
+                }
+                return false;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
         @JavascriptInterface
         public boolean setVoiceLanguage(String langCode) {
             if (tts == null || langCode == null) return false;
@@ -99,9 +340,6 @@ public class MainActivity extends BridgeActivity {
             }
         }
 
-        /**
-         * Real Android Biometric or Device Credential Authentication
-         */
         @JavascriptInterface
         public void requestBiometricAuth(final String challengeId, final String actionId, final String title, final String subtitle) {
             mainHandler.post(() -> {
@@ -136,9 +374,6 @@ public class MainActivity extends BridgeActivity {
             });
         }
 
-        /**
-         * Check if biometric hardware or device credential is enrolled
-         */
         @JavascriptInterface
         public String checkBiometricCapability() {
             BiometricManager biometricManager = BiometricManager.from(MainActivity.this);
@@ -160,9 +395,6 @@ public class MainActivity extends BridgeActivity {
             }
         }
 
-        /**
-         * Native Multilingual Speech Recognition
-         */
         @JavascriptInterface
         public void startListening(String languageCode) {
             mainHandler.post(() -> {
@@ -184,6 +416,8 @@ public class MainActivity extends BridgeActivity {
                     intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag());
                 }
                 intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+                intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1600L);
+                intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L);
 
                 speechRecognizer.setRecognitionListener(new RecognitionListener() {
                     @Override
@@ -191,13 +425,17 @@ public class MainActivity extends BridgeActivity {
                         sendJsEvent("onNativeSpeechReady", "{}");
                     }
                     @Override
-                    public void onBeginningOfSpeech() {}
+                    public void onBeginningOfSpeech() {
+                        sendJsEvent("onNativeSpeechStart", "{}");
+                    }
                     @Override
                     public void onRmsChanged(float rmsdB) {}
                     @Override
                     public void onBufferReceived(byte[] buffer) {}
                     @Override
-                    public void onEndOfSpeech() {}
+                    public void onEndOfSpeech() {
+                        sendJsEvent("onNativeSpeechEnd", "{}");
+                    }
                     @Override
                     public void onError(int error) {
                         sendJsEvent("onNativeSpeechError", "{\"code\":" + error + "}");
@@ -206,16 +444,16 @@ public class MainActivity extends BridgeActivity {
                     public void onResults(Bundle results) {
                         ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                         if (matches != null && !matches.isEmpty()) {
-                            String text = matches.get(0).replace("\"", "\\\"");
-                            sendJsEvent("onNativeSpeechResult", "{\"text\":\"" + text + "\",\"isFinal\":true}");
+                            String quoted = JSONObject.quote(matches.get(0));
+                            sendJsEvent("onNativeSpeechResult", "{\"text\":" + quoted + ",\"isFinal\":true}");
                         }
                     }
                     @Override
                     public void onPartialResults(Bundle partialResults) {
                         ArrayList<String> matches = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                         if (matches != null && !matches.isEmpty()) {
-                            String text = matches.get(0).replace("\"", "\\\"");
-                            sendJsEvent("onNativeSpeechResult", "{\"text\":\"" + text + "\",\"isFinal\":false}");
+                            String quoted = JSONObject.quote(matches.get(0));
+                            sendJsEvent("onNativeSpeechResult", "{\"text\":" + quoted + ",\"isFinal\":false}");
                         }
                     }
                     @Override
@@ -235,14 +473,11 @@ public class MainActivity extends BridgeActivity {
             });
         }
 
-        /**
-         * Native Android Text-to-Speech
-         */
         @JavascriptInterface
         public void speakText(String text) {
             mainHandler.post(() -> {
                 if (tts != null && text != null) {
-                    tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "surya_tts");
+                    tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "surya_tts_" + System.currentTimeMillis());
                 }
             });
         }
@@ -252,13 +487,11 @@ public class MainActivity extends BridgeActivity {
             mainHandler.post(() -> {
                 if (tts != null) {
                     tts.stop();
+                    sendJsEvent("onNativeTtsDone", "{\"stopped\":true}");
                 }
             });
         }
 
-        /**
-         * Dispatch Android Intent via SURYA App Hub
-         */
         @JavascriptInterface
         public boolean launchIntent(String action, String dataUri, String packageName) {
             try {
@@ -278,9 +511,6 @@ public class MainActivity extends BridgeActivity {
             }
         }
 
-        /**
-         * Dispatch APK update through Android Package Installer & FileProvider
-         */
         @JavascriptInterface
         public boolean installApk(String filePath) {
             try {
@@ -308,8 +538,10 @@ public class MainActivity extends BridgeActivity {
 
     private void notifyWebAuthResult(final String challengeId, final boolean success, final String message) {
         String script = String.format(
-            "window.dispatchEvent(new CustomEvent('androidBiometricResult', { detail: { challengeId: '%s', success: %b, message: '%s' } }));",
-            challengeId, success, message
+            "window.dispatchEvent(new CustomEvent('androidBiometricResult', { detail: { challengeId: %s, success: %b, message: %s } }));",
+            JSONObject.quote(challengeId != null ? challengeId : ""),
+            success,
+            JSONObject.quote(message != null ? message : "")
         );
         mainHandler.post(() -> {
             WebView webView = getBridge().getWebView();

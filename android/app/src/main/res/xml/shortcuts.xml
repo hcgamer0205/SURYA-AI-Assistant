@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutId="surya_voice"
+        android:shortcutLongLabel="@string/shortcut_voice_long"
+        android:shortcutShortLabel="@string/shortcut_voice_short">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:data="surya://assistant?action=voice"
+            android:targetClass="com.surya.assistant.MainActivity"
+            android:targetPackage="com.surya.assistant" />
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutId="surya_optics"
+        android:shortcutLongLabel="@string/shortcut_vision_long"
+        android:shortcutShortLabel="@string/shortcut_vision_short">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:data="surya://assistant?action=optics"
+            android:targetClass="com.surya.assistant.MainActivity"
+            android:targetPackage="com.surya.assistant" />
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutId="surya_tasks"
+        android:shortcutLongLabel="@string/shortcut_tasks_long"
+        android:shortcutShortLabel="@string/shortcut_tasks_short">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:data="surya://assistant?action=productivity"
+            android:targetClass="com.surya.assistant.MainActivity"
+            android:targetPackage="com.surya.assistant" />
+    </shortcut>
+</shortcuts>
